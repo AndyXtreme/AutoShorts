@@ -577,6 +577,29 @@ def _run_pycaps_worker(video_path_str: str, srt_path_str: str, output_path_str: 
         width_ratio = _env_float("SUBTITLE_WIDTH_RATIO", 0.85)
         width_ratio = max(0.05, min(1.0, width_ratio))
 
+        # Caption size. Templates set their own font-size (hype: 24px), which is
+        # then rendered at the renderer's device scale - so the on-screen text is
+        # roughly twice the CSS value on a 1080x1920 output.
+        #
+        # Padding and the outline are re-expressed in em so they grow with the
+        # text; leaving them in px would give big captions a hairline outline.
+        # The ratios are the hype template's own (3px/24px, 5px/24px, 2px/24px).
+        font_size = _env_int("SUBTITLE_FONT_SIZE", 0)
+        if font_size > 0:
+            builder.add_css_content(
+                ".word {"
+                f" font-size: {font_size}px;"
+                " padding: 0.125em 0.208em;"
+                " text-shadow:"
+                " -0.083em -0.083em 0 #000,"
+                " 0.083em -0.083em 0 #000,"
+                " -0.083em 0.083em 0 #000,"
+                " 0.083em 0.083em 0 #000,"
+                " 0.125em 0.125em 0.208em rgba(0,0,0,0.5);"
+                "}"
+            )
+            print(f"Caption font size: {font_size}px (template default is 24px for 'hype').")
+
         # What gives when the text does not fit: by default PyCaps adds another
         # line, so "max lines" is only a target - a high char limit still spills
         # onto extra lines. "exceed_width" keeps the line count instead and lets

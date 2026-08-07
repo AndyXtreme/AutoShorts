@@ -296,6 +296,7 @@ happens, then stitches the rest back together. Runs *after* rendering and
 
 | Variable | UI (Settings →) | Default | Effect |
 | :--- | :--- | :--- | :--- |
+| `SUBTITLE_FONT_SIZE` | Caption Layout → Caption font size | `0` | `0` keeps the template's own size (24 for `hype`). On-screen text ends up roughly twice this value at 1080x1920, so 34–44 gives the large captions typical for Shorts. Outline and padding scale with it |
 | `SUBTITLE_MAX_LINES` | Caption Layout → Max caption lines | `2` | Maximum number of lines a caption wraps to |
 | `SUBTITLE_MIN_LINES` | Caption Layout → Min caption lines | `1` | Reserved lines, so captions do not jump vertically |
 | `SUBTITLE_MAX_CHARS` | Caption Layout → Max chars per caption | `15` | Where text is split into the next caption. Small values give the fast word-by-word look |

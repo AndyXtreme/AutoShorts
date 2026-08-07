@@ -200,6 +200,10 @@ def get_schema() -> List[EnvSection]:
                              "neo-minimal", "line-focus", "word-focus", "retro-gaming", "default"],
                     help_text="Look of the captions: font, colours and the animation of the spoken word",
                 ),
+                EnvField("SUBTITLE_FONT_SIZE", "Caption font size", "int", 0, min_value=0, max_value=120,
+                         help_text="0 keeps the template's own size (24 for 'hype'). Rendered text ends up "
+                                   "roughly twice this value on a 1080x1920 output, so 34-44 gives the large "
+                                   "captions typical for Shorts. Outline and padding scale with it"),
                 EnvField("SUBTITLE_MAX_LINES", "Max caption lines", "int", 2, min_value=1, max_value=5,
                          help_text="How many lines a caption may wrap to. 1-2 keeps the frame clear; "
                                    "more lines cover a large part of a vertical video"),
