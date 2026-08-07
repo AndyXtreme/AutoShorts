@@ -212,13 +212,18 @@ docker run --rm --gpus all --shm-size=8g \
     -v $(pwd)/gameplay:/app/gameplay \
     -v $(pwd)/generated:/app/generated \
     -v $(pwd)/.env:/app/.env \
-    -v autoshorts-models:/root/.cache \
+    -v autoshorts-whisper:/root/.cache/whisper \
     andyxtreme/autoshorts:latest
 ```
 
 > The image ships no Whisper or TTS model — they are downloaded on first use.
-> Keep `/root/.cache` on a volume, or every `--rm` run downloads them again
+> Keep those directories on a volume, or every `--rm` run downloads them again
 > (~1.5GB for Whisper `medium`, ~3GB for `large-v3`).
+>
+> Mount the model directories individually, **not** all of `/root/.cache`:
+> Playwright's Chromium lives in `/root/.cache/ms-playwright`, and a volume
+> over the parent hides it — the caption renderer then silently degrades to
+> plain FFmpeg subtitles.
 
 > **Note**: GPU access (`--gpus all`, or the `deploy.resources` block in the
 > compose file) is essential for NVENC and CUDA acceleration.

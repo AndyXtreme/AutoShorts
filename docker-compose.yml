@@ -25,7 +25,13 @@ services:
       # Downloaded models (Whisper ~1.5GB for medium, ~3GB for large-v3, plus
       # the TTS model when enabled). Without this they are fetched again for
       # every `docker compose run --rm`, since the image ships none of them.
-      - models:/root/.cache
+      #
+      # Deliberately the two model directories and NOT all of /root/.cache:
+      # Playwright's Chromium is baked into /root/.cache/ms-playwright at build
+      # time, and a volume over the parent hides it. PyCaps then cannot render
+      # and silently falls back to plain FFmpeg subtitles.
+      - whisper-models:/root/.cache/whisper
+      - hf-models:/root/.cache/huggingface
 
     # Whisper and the caption renderer need more than the 64MB default
     shm_size: "8gb"
@@ -45,4 +51,5 @@ services:
     #   context: .
 
 volumes:
-  models:
+  whisper-models:
+  hf-models:
