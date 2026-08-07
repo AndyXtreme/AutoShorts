@@ -52,6 +52,30 @@ class SubtitleConfig:
         )
 
 
+def _env_int(name: str, default: int) -> int:
+    """Read an int env var, falling back to the default on empty/invalid input."""
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(float(raw))
+    except (TypeError, ValueError):
+        logging.warning("Env var %s=%r is not a valid int. Using %s.", name, raw, default)
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    """Read a float env var, falling back to the default on empty/invalid input."""
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        logging.warning("Env var %s=%r is not a valid float. Using %s.", name, raw, default)
+        return default
+
+
 def is_subtitles_enabled() -> bool:
     """Check if subtitle generation is enabled via env."""
     return os.getenv("ENABLE_SUBTITLES", "true").lower() in ("true", "1", "yes")
@@ -95,12 +119,17 @@ def transcribe_audio(video_path: Path, output_srt: Optional[Path] = None) -> Pat
         
         # Generate SRT content
         srt_content = _generate_srt(result)
-        
+
         # Write SRT file
         with open(output_srt, "w", encoding="utf-8") as f:
             f.write(srt_content)
-        
+
         logging.info(f"Transcription saved to: {output_srt}")
+
+        # SRT only carries segment boundaries, so the caption renderer would have
+        # to spread words evenly across each segment - which drifts audibly out of
+        # sync. Keep Whisper's per-word timings in a sidecar for PyCaps to use.
+        _write_word_timings(result, word_timings_path(output_srt))
         
 
         
@@ -112,6 +141,52 @@ def transcribe_audio(video_path: Path, output_srt: Optional[Path] = None) -> Pat
     except Exception as e:
         logging.error(f"Transcription failed: {e}")
         raise
+
+
+def word_timings_path(srt_path: Path) -> Path:
+    """Sidecar path holding Whisper's per-word timings for a given SRT."""
+    return srt_path.with_suffix(".words.json")
+
+
+def _write_word_timings(whisper_result: dict, output_path: Path) -> Optional[Path]:
+    """Persist Whisper's word-level timings alongside the SRT.
+
+    Whisper is called with word_timestamps=True, but _generate_srt keeps only the
+    segment boundaries. Writing the word timings out lets the caption renderer
+    highlight each word when it is actually spoken instead of assuming every word
+    in a segment takes the same amount of time.
+
+    Returns the written path, or None if Whisper produced no word-level data.
+    """
+    segments = []
+    for segment in whisper_result.get("segments", []):
+        words = []
+        for word in segment.get("words") or []:
+            text = str(word.get("word", "")).strip()
+            start = word.get("start")
+            end = word.get("end")
+            if not text or start is None or end is None:
+                continue
+            words.append({"text": text, "start": float(start), "end": float(end)})
+
+        if not words:
+            continue
+
+        segments.append({
+            "start": float(segment.get("start", words[0]["start"])),
+            "end": float(segment.get("end", words[-1]["end"])),
+            "words": words,
+        })
+
+    if not segments:
+        logging.warning("Whisper returned no word-level timings; captions will use interpolated timing.")
+        return None
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump({"segments": segments}, f, ensure_ascii=False)
+
+    logging.info(f"Word timings saved to: {output_path}")
+    return output_path
 
 
 def _generate_srt(whisper_result: dict) -> str:
@@ -262,7 +337,7 @@ def _run_pycaps_worker(video_path_str: str, srt_path_str: str, output_path_str: 
     try:
         from pycaps import CapsPipelineBuilder
         from pycaps.transcriber import AudioTranscriber
-        from pycaps.common import Document, Segment, Line, Word, TimeFragment
+        from pycaps.common import Document, Segment, Line, Word, TimeFragment, Tag
         from pycaps.tag import SemanticTagger
         from pycaps.template import TemplateLoader
         
@@ -271,12 +346,84 @@ def _run_pycaps_worker(video_path_str: str, srt_path_str: str, output_path_str: 
             def __init__(self, srt_path):
                 self.srt_path = srt_path
                 
+            def _build_word(self, text, start, end, index, total):
+                """Create a Word carrying the structure tags PyCaps templates rely on.
+
+                No trailing space is appended: Line.get_text() already joins words
+                with ' ', and the renderer rebuilds the DOM with text.split(' ').
+                A trailing space therefore produces double spaces, which yields one
+                empty <span> per word, shifts every word-N-in-line class by one and
+                leaves the last word without a class at all - the highlight then
+                lands on the wrong word. Word spacing comes from the template CSS.
+                """
+                word = Word(text=text, time=TimeFragment(start=start, end=end))
+                if index == 0:
+                    word.structure_tags.add(Tag(name="first-word-in-segment"))
+                    word.structure_tags.add(Tag(name="first-word-in-line"))
+                if index == total - 1:
+                    word.structure_tags.add(Tag(name="last-word-in-segment"))
+                    word.structure_tags.add(Tag(name="last-word-in-line"))
+                return word
+
+            def _document_from_word_timings(self, path) -> Optional[Document]:
+                """Build the document from Whisper's per-word timings, if available."""
+                if not os.path.exists(path):
+                    return None
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                except Exception as e:
+                    print(f"Could not read word timings {path}: {e}")
+                    return None
+
+                document = Document()
+                word_count = 0
+                for entry in data.get("segments", []):
+                    words = entry.get("words") or []
+                    if not words:
+                        continue
+
+                    segment_time = TimeFragment(start=entry["start"], end=entry["end"])
+                    segment = Segment(time=segment_time)
+                    line = Line(time=segment_time)
+                    segment.lines.add(line)
+
+                    for i, w in enumerate(words):
+                        start = float(w["start"])
+                        end = float(w["end"])
+                        # Whisper can emit zero-length or inverted spans on very
+                        # short words; give them a minimum so the clip is not
+                        # dropped by SubtitleClipsGenerator (it skips end <= start).
+                        if end <= start:
+                            end = start + 0.05
+                        line.words.add(self._build_word(w["text"], start, end, i, len(words)))
+                        word_count += 1
+
+                    line.structure_tags.add(Tag(name="last-line-in-segment"))
+                    segment.structure_tags.add(Tag(name="segment"))
+                    document.segments.add(segment)
+
+                if not document.segments:
+                    return None
+
+                print(f"Using Whisper word timings: {len(document.segments)} segments, {word_count} words.")
+                return document
+
             def transcribe(self, audio_path: str) -> Document:
+                # Prefer real per-word timings; fall back to the SRT (which only
+                # has segment boundaries and needs the words spread evenly).
+                from_words = self._document_from_word_timings(
+                    os.path.splitext(self.srt_path)[0] + ".words.json"
+                )
+                if from_words is not None:
+                    return from_words
+
+                print("No word timings found; falling back to interpolated SRT timing.")
                 document = Document()
                 if not os.path.exists(self.srt_path):
                     print(f"SRT file not found: {self.srt_path}")
                     return document
-                    
+
                 try:
                     with open(self.srt_path, 'r', encoding='utf-8') as f:
                         content = f.read()
@@ -340,34 +487,18 @@ def _run_pycaps_worker(video_path_str: str, srt_path_str: str, output_path_str: 
                         duration = end - start
                         word_duration = duration / len(words)
                         
-                        from pycaps.common import Tag
-                        
                         current_time = start
                         for i, w_text in enumerate(words):
                             w_start = current_time
                             w_end = current_time + word_duration
                             # Ensure no overlap issues or zero duration
                             if w_end > end: w_end = end
-                            
-                            # Add space to word text to prevent "SOCLOSE" issues
-                            final_text = w_text + " "
-                            
-                            word = Word(
-                                text=final_text, 
-                                time=TimeFragment(start=w_start, end=w_end)
+
+                            line.words.add(
+                                self._build_word(w_text, w_start, w_end, i, len(words))
                             )
-                            
-                            # Explicitly tag key words to prevent merging
-                            if i == len(words) - 1:
-                                word.structure_tags.add(Tag(name="last-word-in-segment"))
-                                word.structure_tags.add(Tag(name="last-word-in-line"))
-                            if i == 0:
-                                word.structure_tags.add(Tag(name="first-word-in-segment"))
-                                word.structure_tags.add(Tag(name="first-word-in-line"))
-                                
-                            line.words.add(word)
                             current_time += word_duration
-                            
+
                         # Explicitly tag the line
                         line.structure_tags.add(Tag(name="last-line-in-segment"))
                         segment.structure_tags.add(Tag(name="segment"))
@@ -391,11 +522,81 @@ def _run_pycaps_worker(video_path_str: str, srt_path_str: str, output_path_str: 
         print(f"Loading PyCaps template: {template_name}")
         builder = TemplateLoader(template_name).with_input_video(video_path_str).load(should_build_pipeline=False)
         
-        if hasattr(builder, "_caps_pipeline"):
-            print("Force-clearing PyCaps segment splitters to enforce strict SRT timing.")
-            if hasattr(builder._caps_pipeline, "_segment_splitters"):
-                 builder._caps_pipeline._segment_splitters = []
-                 print("Cleared splitters.")
+        # --- Caption layout -------------------------------------------------
+        # The template ships its own layout and splitters (hype: max 2 lines,
+        # limit_by_chars 10-15). Expose both so they can be tuned per channel
+        # without editing the template JSON inside site-packages.
+        #
+        # PYCAPS_KEEP_SPLITTERS=false drops splitting entirely: a whole Whisper
+        # block (often 10s of speech) then lands on screen at once, which is
+        # 4-5 lines covering a third of a 9:16 frame. Exact SRT block boundaries,
+        # bad readability.
+        from pycaps import (
+            SubtitleLayoutOptions,
+            LimitByCharsSplitter,
+            SplitIntoSentencesSplitter,
+        )
+        from pycaps.layout import VerticalAlignment, VerticalAlignmentType, TextOverflowStrategy
+
+        pipeline_obj = getattr(builder, "_caps_pipeline", None)
+        keep_splitters = os.getenv("PYCAPS_KEEP_SPLITTERS", "true").lower() in ("true", "1", "yes")
+
+        if not keep_splitters:
+            if pipeline_obj is not None and hasattr(pipeline_obj, "_segment_splitters"):
+                pipeline_obj._segment_splitters = []
+                print("Segment splitters cleared - whole SRT blocks shown at once.")
+        else:
+            max_chars = _env_int("SUBTITLE_MAX_CHARS", 15)
+            min_chars = _env_int("SUBTITLE_MIN_CHARS", 10)
+            if min_chars > max_chars:
+                print(f"SUBTITLE_MIN_CHARS ({min_chars}) > SUBTITLE_MAX_CHARS ({max_chars}); using max for both.")
+                min_chars = max_chars
+
+            # Replace rather than append: the template's own char limits would
+            # otherwise still apply and win over the configured ones.
+            if pipeline_obj is not None and hasattr(pipeline_obj, "_segment_splitters"):
+                pipeline_obj._segment_splitters = []
+            builder.add_segment_splitter(SplitIntoSentencesSplitter())
+            builder.add_segment_splitter(LimitByCharsSplitter(max_chars, min_chars))
+            print(f"Caption splitting: {min_chars}-{max_chars} chars per segment.")
+
+        max_lines = _env_int("SUBTITLE_MAX_LINES", 2)
+        min_lines = _env_int("SUBTITLE_MIN_LINES", 1)
+        if min_lines > max_lines:
+            min_lines = max_lines
+
+        align_name = os.getenv("SUBTITLE_VERTICAL_ALIGN", "bottom").strip().lower()
+        try:
+            align = VerticalAlignmentType(align_name)
+        except ValueError:
+            print(f"Unknown SUBTITLE_VERTICAL_ALIGN={align_name!r}; falling back to bottom.")
+            align = VerticalAlignmentType.BOTTOM
+
+        offset = _env_float("SUBTITLE_VERTICAL_OFFSET", -0.1)
+        offset = max(-1.0, min(1.0, offset))
+        width_ratio = _env_float("SUBTITLE_WIDTH_RATIO", 0.85)
+        width_ratio = max(0.05, min(1.0, width_ratio))
+
+        # What gives when the text does not fit: by default PyCaps adds another
+        # line, so "max lines" is only a target - a high char limit still spills
+        # onto extra lines. "exceed_width" keeps the line count instead and lets
+        # the last line run wider than the width ratio.
+        overflow_name = os.getenv("SUBTITLE_OVERFLOW", "exceed_lines").strip().lower()
+        try:
+            overflow = TextOverflowStrategy(overflow_name)
+        except ValueError:
+            print(f"Unknown SUBTITLE_OVERFLOW={overflow_name!r}; falling back to exceed_lines.")
+            overflow = TextOverflowStrategy.EXCEED_MAX_NUMBER_OF_LINES
+
+        builder.with_layout_options(SubtitleLayoutOptions(
+            max_number_of_lines=max_lines,
+            min_number_of_lines=min_lines,
+            max_width_ratio=width_ratio,
+            on_text_overflow_strategy=overflow,
+            vertical_align=VerticalAlignment(align=align, offset=offset),
+        ))
+        print(f"Caption layout: {min_lines}-{max_lines} lines, width {width_ratio}, "
+              f"{align.value} {offset:+}, overflow={overflow.value}.")
 
         # EXPLICITLY tell PyCaps to use our SRT file instead of transcribing audio
         # This fixes the issue where it ignores AI captions and transcribes game audio
