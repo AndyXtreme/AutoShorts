@@ -137,6 +137,16 @@ RUN playwright install chromium
 COPY --from=builder /wheels/*.whl /tmp/
 RUN pip install --no-cache-dir /tmp/*.whl && rm -f /tmp/*.whl
 
+# A C compiler, for Triton. It builds a small helper module at runtime, and
+# without a compiler Whisper's CUDA DTW - which computes the word timings the
+# captions are highlighted by - throws and falls back to a CPU implementation
+# (0.75s per call instead of 0.001s), warning about a "missing CUDA toolkit".
+# The toolkit is not the issue; ptxas ships with Triton. Costs ~200MB.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    libc6-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 # C++ library fix for compatibility
 RUN rm -f /opt/conda/lib/libstdc++.so.6 && \
     ln -s /usr/lib/x86_64-linux-gnu/libstdc++.so.6 /opt/conda/lib/libstdc++.so.6
