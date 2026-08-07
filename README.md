@@ -188,8 +188,8 @@ Clone this repository, then build the image under the name the compose file
 expects:
 
 ```bash
-git clone https://github.com/andyxtreme/autoshorts.git
-cd autoshorts
+git clone https://github.com/AndyXtreme/AutoShorts.git
+cd AutoShorts
 docker build -t andyxtreme/autoshorts:latest .
 docker compose up -d
 ```
