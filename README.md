@@ -280,6 +280,12 @@ Which moments become clips. Applied *before* anything is rendered.
 | `ACTION_W_AUDIO` | Action Detection → Audio weight | `0.6` | How strongly loudness peaks (gunfire, shouting, impacts) drive selection |
 | `ACTION_W_VIDEO` | Action Detection → Motion weight | `0.4` | How strongly frame-to-frame motion drives it. Only the ratio matters — raise it above the audio weight to favour visually busy moments over loud ones |
 
+> For gameplay with constant engine or ambient noise, loudness carries little
+> information: the audio is loud throughout, whether or not anything
+> interesting happens. Setting `ACTION_W_AUDIO=0` / `ACTION_W_VIDEO=1` picks
+> purely on motion and tends to find the better moments. Commentary-driven
+> footage benefits from the opposite.
+
 ### Clip Length
 
 | Variable | UI (Settings →) | Default | Effect |
