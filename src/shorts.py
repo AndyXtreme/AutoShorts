@@ -244,6 +244,13 @@ def _get_env_float(name: str, default: float) -> float:
         return default
 
 
+# Weighting of the combined action score. Audio contributes loudness spikes
+# (gunfire, shouting, impacts), video contributes frame-to-frame motion.
+# Raise ACTION_W_VIDEO to bias clip selection toward movement over loudness.
+ACTION_W_AUDIO = _get_env_float("ACTION_W_AUDIO", 0.6)
+ACTION_W_VIDEO = _get_env_float("ACTION_W_VIDEO", 0.4)
+
+
 @dataclass(frozen=True)
 class ProcessingConfig:
     """Configuration values used throughout the processing pipeline."""
@@ -976,8 +983,8 @@ def scene_action_score(
     audio_score: np.ndarray,
     video_times: np.ndarray | None = None,
     video_score: np.ndarray | None = None,
-    w_audio: float = 0.6,
-    w_video: float = 0.4,
+    w_audio: float = ACTION_W_AUDIO,
+    w_video: float = ACTION_W_VIDEO,
 ) -> float:
     """Return total (summed) action score within the scene."""
 
@@ -1058,8 +1065,8 @@ def best_action_window_start(
     audio_score: np.ndarray,
     video_times: np.ndarray | None = None,
     video_score: np.ndarray | None = None,
-    w_audio: float = 0.6,
-    w_video: float = 0.4,
+    w_audio: float = ACTION_W_AUDIO,
+    w_video: float = ACTION_W_VIDEO,
 ) -> float:
     """Find the start of the window inside the scene maximizing combined action."""
 
@@ -2018,10 +2025,75 @@ def rank_scenes_with_ai(
             pass
 
 
+def _pick_window_length(effective_min: int, effective_max: int) -> int:
+    """How long a window to cut out of a scene.
+
+    "max" takes the longest allowed window. That pairs with dead-air removal:
+    grab generously, then let the cutter tighten it. It also makes runs
+    reproducible - the clip start is already deterministic, so a random length
+    was the only reason two runs with identical settings produced different
+    endings, which reads as "the funny bit at the end disappeared".
+
+    "random" restores the original behaviour of drawing a length per clip.
+    """
+    if effective_max <= effective_min:
+        return effective_max
+
+    mode = os.getenv("CLIP_LENGTH_MODE", "max").strip().lower()
+    if mode == "random":
+        return random.randint(effective_min, effective_max)
+    if mode != "max":
+        logging.warning(f"Unknown CLIP_LENGTH_MODE={mode!r}; using 'max'.")
+    return effective_max
+
+
+def clip_output_dir(output_dir: Path, video_file: Path) -> Path:
+    """Folder that holds every clip produced from one source video.
+
+    Keeps clips, transcripts and render logs of different recordings apart
+    instead of interleaving them in one flat folder. Created on demand.
+    """
+    target = output_dir / video_file.stem
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def reset_clip_output_dir(output_dir: Path, video_file: Path) -> Path:
+    """Clear a source video's output folder before a fresh run.
+
+    Clip names are deterministic (scene-0, scene-1, ...), so a rerun overwrites
+    what it produces - but only up to however many clips it makes this time. A
+    run with a lower SCENE_LIMIT would leave the surplus clips of the previous
+    run behind, indistinguishable from the current ones.
+
+    Only files this pipeline writes are removed (the scene-* family); anything
+    else the user keeps in that folder is left alone. Must be called once per
+    video, never per clip, or it would delete the clips already rendered in
+    this same run.
+    """
+    target = clip_output_dir(output_dir, video_file)
+
+    removed = 0
+    for path in target.glob("scene-*"):
+        if not path.is_file():
+            continue
+        try:
+            path.unlink()
+            removed += 1
+        except OSError as e:
+            logging.warning(f"Could not remove stale output {path.name}: {e}")
+
+    if removed:
+        logging.info(f"Cleared {removed} file(s) from a previous run in {target.name}/")
+    return target
+
+
 def process_video(video_file: Path, config: ProcessingConfig, output_dir: Path) -> None:
     """Process a single video file and generate short clips."""
 
     logging.info("\nProcess: %s", video_file.name)
+
+    reset_clip_output_dir(output_dir, video_file)
 
     # ==========================================================================
     # DEBUG MODE: Check if we should skip analysis and use cached checkpoint
@@ -2301,10 +2373,10 @@ def process_video(video_file: Path, config: ProcessingConfig, output_dir: Path) 
     if final_scene_list:
         for i, scene in enumerate(final_scene_list):
             duration = math.floor(scene[1].get_seconds() - scene[0].get_seconds())
-            # Ensure min <= max for randint (scene might be shorter than min_short_length)
+            # Ensure min <= max (scene might be shorter than min_short_length)
             effective_max = min(config.max_short_length, duration)
             effective_min = min(config.min_short_length, effective_max)
-            short_length = random.randint(effective_min, effective_max)
+            short_length = _pick_window_length(effective_min, effective_max)
 
             best_start = best_action_window_start(
                 scene,
@@ -2321,8 +2393,18 @@ def process_video(video_file: Path, config: ProcessingConfig, output_dir: Path) 
                 short_length,
             )
 
-            render_file_name = f"{video_file.stem} scene-{i}{video_file.suffix}"
-            render_path = output_dir / render_file_name
+            # Always MP4, never the source container. Matroska does not store a
+            # per-stream duration, so ffprobe reports "N/A"; movielite's audio
+            # probe (AudioClip) turns that ValueError into has_audio=False and
+            # the subtitle stage then silently drops the audio track.
+            # It also keeps the extension honest - PyCaps writes MP4 regardless.
+            #
+            # One folder per source video: the pipeline processes everything in
+            # gameplay/, so a flat output folder interleaves clips from different
+            # recordings, along with their .words.json / _sub.json / ffmpeg logs.
+            # The folder carries the source name, so the clips no longer repeat it.
+            clip_dir = clip_output_dir(output_dir, video_file)
+            render_path = clip_dir / f"scene-{i}.mp4"
 
             # Prepare render params
             params = get_render_params(
@@ -2339,6 +2421,27 @@ def process_video(video_file: Path, config: ProcessingConfig, output_dir: Path) 
                 max_error_depth=config.max_error_depth,
             )
             
+            # Cut dead air before subtitles run, so the transcript is generated
+            # from the final timeline and no caption timing has to be remapped.
+            if render_path.exists():
+                try:
+                    from silence_cutter import remove_dead_air
+                    # Deliberately NOT config.min_short_length: that value also
+                    # filters scenes and drives window selection, so lowering it
+                    # to allow tighter finals would make the pipeline pick
+                    # thinner source windows too. Selection stays generous, the
+                    # finished clip is allowed to end up much shorter.
+                    remove_dead_air(
+                        render_path,
+                        source_offset=params.start_time,
+                        duration=params.duration,
+                        video_times=video_times,
+                        video_scores=video_score,
+                        min_clip_length=_get_env_float("SILENCE_MIN_RESULT", 8.0),
+                    )
+                except Exception as e:
+                    logging.warning(f"Silence cutting failed, keeping full clip: {e}")
+
             # Track for subtitle processing with detected category and render metadata
             if render_path.exists():
                 scene_key = scene[0].get_seconds()
@@ -2382,7 +2485,7 @@ def process_video(video_file: Path, config: ProcessingConfig, output_dir: Path) 
             config
         )
 
-        render_path = output_dir / video_file.name
+        render_path = clip_output_dir(output_dir, video_file) / "scene-0.mp4"
         render_video_gpu_isolated(
             params,
             render_path,
