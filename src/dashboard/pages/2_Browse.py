@@ -37,7 +37,7 @@ def _render_video_grid(videos, cols_count=3, key_prefix="vid"):
                 <div style="background: linear-gradient(135deg, #1A1D2E 0%, #1E3A5F 100%); 
                             padding: 1rem; border-radius: 10px; margin-bottom: 1rem;
                             border: 1px solid #2D3348;">
-                    <h3 style="margin: 0;">▶️ {selected_path.name}</h3>
+                    <h3 style="margin: 0;">▶️ {selected_path.parent.name} / {selected_path.name}</h3>
                 </div>
             """, unsafe_allow_html=True)
             
@@ -87,11 +87,16 @@ def _render_video_grid(videos, cols_count=3, key_prefix="vid"):
                             </div>
                         """, unsafe_allow_html=True)
                     
-                    # Video info
-                    st.markdown(f"**{info.path.name[:25]}{'...' if len(info.path.name) > 25 else ''}**")
+                    # Clips are grouped in one folder per source video, so the
+                    # file name alone is just "scene-0" - show the source too.
+                    label = f"{info.path.parent.name} / {info.path.name}"
+                    st.markdown(f"**{label[:34]}{'...' if len(label) > 34 else ''}**")
                     st.caption(f"⏱️ {info.duration:.0f}s • 💾 {info.size_mb:.1f}MB")
-                    
-                    if st.button("▶️ Play", key=f"{key_prefix}_{info.path.stem}", width="stretch"):
+
+                    # Key must include the folder: several sources produce a
+                    # scene-0, and duplicate widget keys are a hard Streamlit error.
+                    widget_key = f"{key_prefix}_{info.path.parent.name}_{info.path.stem}"
+                    if st.button("▶️ Play", key=widget_key, width="stretch"):
                         st.session_state[selected_key] = info.path
                         st.rerun()
 
@@ -120,7 +125,8 @@ def render() -> None:
     tab1, tab2 = st.tabs(["🎬 Generated Clips", "🎮 Gameplay Videos"])
     
     with tab1:
-        generated_videos = list_videos(Path("generated"))
+        # recursive: clips live in one subfolder per source video
+        generated_videos = list_videos(Path("generated"), recursive=True)
         # Sort by modification time, newest first
         generated_videos = sorted(generated_videos, key=lambda v: v.path.stat().st_mtime, reverse=True)
         

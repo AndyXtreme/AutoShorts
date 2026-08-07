@@ -39,14 +39,14 @@ def render() -> None:
         </div>
     """, unsafe_allow_html=True)
     
-    generated = list_videos(Path("generated"))
+    generated = list_videos(Path("generated"), recursive=True)
     if not generated:
         st.info("📁 No generated clips to analyze. Generate some clips first!")
         return
 
     durations = [info.duration for info in generated]
     sizes = [info.size_mb for info in generated]
-    names = [info.path.name for info in generated]
+    names = [f"{info.path.parent.name}/{info.path.name}" for info in generated]
 
     # Stats cards
     cols = st.columns(4)

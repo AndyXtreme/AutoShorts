@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
-import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -104,6 +104,41 @@ VIDEO_TYPE_STYLES = {
 }
 
 
+VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
+
+
+def _folder_signature(folder: Path) -> tuple:
+    """Cheap fingerprint of a folder's videos: name, size and mtime.
+
+    Deliberately avoids opening the files - this runs on a timer, and decoding
+    every video on each poll would keep a GPU-sized process busy for nothing.
+    Size is part of the signature so a file still being copied in registers as
+    changed until the copy settles.
+    """
+    if not folder.exists():
+        return ()
+    entries = []
+    for path in folder.iterdir():
+        if path.suffix.lower() not in VIDEO_SUFFIXES:
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        entries.append((path.name, stat.st_size, int(stat.st_mtime)))
+    return tuple(sorted(entries))
+
+
+@st.fragment(run_every="3s")
+def _watch_gameplay_folder(folder: Path) -> None:
+    """Rerun the page when the gameplay folder changes underneath us."""
+    signature = _folder_signature(folder)
+    previous = st.session_state.get("_gameplay_signature")
+    st.session_state["_gameplay_signature"] = signature
+    if previous is not None and previous != signature:
+        st.rerun(scope="app")
+
+
 def _build_env(overrides: dict) -> dict:
     env = os.environ.copy()
     env.update({k: str(v) for k, v in overrides.items()})
@@ -148,6 +183,15 @@ def render() -> None:
         gameplay_dir = Path("gameplay")
         disabled_dir = gameplay_dir / ".disabled"
         disabled_dir.mkdir(parents=True, exist_ok=True)
+
+        # Pick up files copied into gameplay/ from outside the UI. Streamlit only
+        # redraws on interaction, so without this a file dropped into the mounted
+        # folder would stay invisible until the user clicked something. The
+        # fragment polls cheaply (names, sizes, mtimes - no video decoding) and
+        # reruns the whole page only when the folder actually changed.
+        _watch_gameplay_folder(gameplay_dir)
+
+        st.caption(f"📂 Watching `{gameplay_dir.resolve()}` - files copied in here show up automatically.")
 
         # Get list of active and disabled videos
         gameplay_videos = list_videos(gameplay_dir)
@@ -203,41 +247,44 @@ def render() -> None:
 
         # Action Buttons
         st.divider()
-        col_add, col_clear = st.columns([1, 1])
+        col_add, col_clear, col_rescan = st.columns([2, 1, 1])
         
         with col_add:
-            if st.button("📂 Add Video", type="primary", width="stretch"):
-                try:
-                    # Run the helper script to open file dialog
-                    result = subprocess.run(
-                        [sys.executable, "src/dashboard/utils/file_dialog_helper.py"],
-                        capture_output=True,
-                        text=True,
-                        check=False
-                    )
-                    
-                    if result.returncode == 0 and result.stdout.strip():
-                        source_path = Path(result.stdout.strip())
-                        if source_path.exists():
-                            gameplay_dir.mkdir(exist_ok=True)
-                            
-                            link_path = gameplay_dir / source_path.name
-                            if link_path.exists():
-                                st.warning(f"⚠️ '{source_path.name}' is already in the queue")
-                            else:
-                                try:
-                                    link_path.symlink_to(source_path.resolve())
-                                    st.success(f"✅ Added to queue: {source_path.name}")
-                                    st.rerun()
-                                except Exception as e:
-                                    st.error(f"❌ Failed to link video: {e}")
-                    else:
-                        if result.stderr:
-                             st.error(f"Dialog Error: {result.stderr}")
-                        
-                except Exception as e:
-                    st.error(f"Failed to open file dialog: {e}")
-        
+            # Upload rather than a native file dialog: the previous version
+            # shelled out to zenity/tkinter, which do not exist in the container
+            # the UI is served from. Dropping files into gameplay/ on the host
+            # works just as well and shows up here on the next rerun.
+            uploaded = st.file_uploader(
+                "📂 Add video",
+                type=["mp4", "mkv", "mov", "avi", "webm", "m4v"],
+                accept_multiple_files=True,
+                key="gameplay_upload",
+                help="Copies into gameplay/. Browser uploads are buffered in memory, so for "
+                     "very large recordings it is faster and safer to copy the file straight "
+                     "into the gameplay/ folder - it is picked up automatically.",
+            )
+            if uploaded:
+                handled = st.session_state.setdefault("_uploaded_names", set())
+                added = 0
+                gameplay_dir.mkdir(exist_ok=True)
+                for upload in uploaded:
+                    if upload.name in handled:
+                        continue
+                    handled.add(upload.name)
+                    destination = gameplay_dir / upload.name
+                    if destination.exists():
+                        st.warning(f"⚠️ '{upload.name}' is already in the queue")
+                        continue
+                    try:
+                        with open(destination, "wb") as target:
+                            shutil.copyfileobj(upload, target)
+                        added += 1
+                    except Exception as e:
+                        st.error(f"❌ Could not save '{upload.name}': {e}")
+                if added:
+                    st.success(f"✅ Added {added} video(s) to the queue")
+                    st.rerun()
+
         with col_clear:
             if st.button("🗑️ Clear Queue", type="secondary", width="stretch", disabled=not gameplay_videos):
                 cleaned_count = 0
@@ -265,7 +312,13 @@ def render() -> None:
                 else:
                     st.warning("Queue already empty")
 
-        
+        with col_rescan:
+            # The folder is polled every few seconds anyway; this is for when you
+            # just finished copying a file and do not want to wait for the tick.
+            if st.button("🔄 Rescan", type="secondary", width="stretch",
+                         help="Re-read the gameplay folder now"):
+                st.rerun()
+
         st.divider()
         
         # Quick settings

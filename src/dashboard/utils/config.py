@@ -44,16 +44,63 @@ def get_schema() -> List[EnvSection]:
                          help_text="How many times to retry if rendering fails"),
                 EnvField("SCENE_LIMIT", "Scene limit", "int", 4, min_value=1, max_value=50,
                          help_text="Maximum number of clips to generate"),
+                EnvField("TARGET_RATIO_W", "Aspect ratio width", "int", 9, min_value=1, max_value=32,
+                         help_text="Width part of the output aspect ratio. 9 with height 16 = vertical Shorts format"),
+                EnvField("TARGET_RATIO_H", "Aspect ratio height", "int", 16, min_value=1, max_value=32,
+                         help_text="Height part of the output aspect ratio. 16 with width 9 = vertical Shorts format"),
+                EnvField("MAX_OUTPUT_HEIGHT", "Max output height (px)", "int", 1920, min_value=480, max_value=3840,
+                         help_text="Caps the rendered resolution. 1920 gives 1080x1920 at 9:16"),
+            ],
+        ),
+        EnvSection(
+            title="Action Detection",
+            expanded=True,
+            fields=[
+                EnvField("ACTION_W_AUDIO", "Audio weight", "float", 0.6, min_value=0.0, max_value=1.0, step=0.05,
+                         help_text="How much loudness spikes (gunfire, shouting, impacts) drive clip selection"),
+                EnvField("ACTION_W_VIDEO", "Motion weight", "float", 0.4, min_value=0.0, max_value=1.0, step=0.05,
+                         help_text="How much frame-to-frame motion drives clip selection. Raise above the audio "
+                                   "weight to favour visually busy moments over loud ones. Only the ratio matters"),
+            ],
+        ),
+        EnvSection(
+            title="Dead Air Removal",
+            expanded=True,
+            fields=[
+                EnvField("REMOVE_SILENCE", "Cut out dead air", "bool", True,
+                         help_text="Cut stretches out of a clip where nothing is said and nothing happens, "
+                                   "then stitch the rest back together"),
+                EnvField("SILENCE_MIN_GAP", "Min gap to cut (s)", "float", 1.0,
+                         min_value=0.2, max_value=10.0, step=0.1,
+                         help_text="Only gaps at least this long are removed. Around 1s keeps normal speech "
+                                   "rhythm intact; 0.5s gives the hard jump-cut style"),
+                EnvField("SILENCE_PADDING", "Keep around speech (s)", "float", 0.15,
+                         min_value=0.0, max_value=1.0, step=0.05,
+                         help_text="Breathing room kept before and after each word so cuts do not clip syllables"),
+                EnvField("SILENCE_MIN_RESULT", "Min length after cutting (s)", "float", 8.0,
+                         min_value=1.0, max_value=60.0, step=0.5,
+                         help_text="Floor for the finished clip. Cutting stops here even if more dead air "
+                                   "remains. Independent of the clip length settings below, which govern how "
+                                   "much source material is selected - pick generously, cut tightly"),
+                EnvField("SILENCE_MOTION_KEEP", "Protect motion above", "float", 0.5,
+                         min_value=-1.0, max_value=3.0, step=0.1,
+                         help_text="Silent moments with at least this much motion are kept anyway, measured in "
+                                   "standard deviations above the video's average. Lower keeps more silent "
+                                   "action, higher cuts more aggressively"),
             ],
         ),
         EnvSection(
             title="Clip Length Settings",
             expanded=True,
             fields=[
-                EnvField("MIN_SHORT_LENGTH", "Min short length (s)", "int_auto", 0, min_value=5, max_value=120,
+                EnvField("CLIP_LENGTH_MODE", "Window length", "select", "max", options=["max", "random"],
+                         help_text="max: always take the longest allowed window and let dead-air removal "
+                                   "tighten it - reproducible, and nothing at the end gets lost. "
+                                   "random: draw a length per clip, so reruns end at different points"),
+                EnvField("MIN_SHORT_LENGTH", "Min short length (s)", "int_auto", 15, min_value=5, max_value=120,
                          help_text="Shortest allowed clip. Auto mode picks based on video length"),
-                EnvField("MAX_SHORT_LENGTH", "Max short length (s)", "int_auto", 0, min_value=15, max_value=300,
-                         help_text="Longest allowed clip. Auto mode picks based on video length"),
+                EnvField("MAX_SHORT_LENGTH", "Max short length (s)", "int_auto", 59, min_value=15, max_value=300,
+                         help_text="Longest allowed clip. 59s keeps clips inside the YouTube Shorts limit"),
                 EnvField("MAX_COMBINED_SCENE_LENGTH", "Max combined scene (s)", "int_auto", 0, min_value=30, max_value=600,
                          help_text="Max length when merging multiple scenes. Auto adjusts based on scene limit"),
             ],
@@ -62,8 +109,9 @@ def get_schema() -> List[EnvSection]:
             title="AI Providers",
             expanded=True,
             fields=[
-                EnvField("AI_PROVIDER", "AI provider", "select", "openai", options=["openai", "gemini", "local"],
-                         help_text="Which AI service to use for scene analysis"),
+                EnvField("AI_PROVIDER", "AI provider", "select", "local", options=["local", "openai", "gemini"],
+                         help_text="local = heuristics only, no API calls and no cost. openai/gemini rank scenes "
+                                   "semantically (funny, clutch, epic fail) but send clips to that provider"),
                 EnvField(
                     "VIDEO_TYPE",
                     "Video type",
@@ -109,40 +157,99 @@ def get_schema() -> List[EnvSection]:
         ),
         EnvSection(
             title="Subtitles",
+            expanded=True,
             fields=[
                 EnvField("ENABLE_SUBTITLES", "Enable subtitles", "bool", True,
-                         help_text="Add text captions to generated clips"),
+                         help_text="Add animated captions to generated clips"),
                 EnvField(
                     "SUBTITLE_MODE",
                     "Subtitle mode",
                     "select",
-                    "ai_captions",
+                    "speech",
                     options=["speech", "ai_captions", "none"],
-                    help_text="speech = transcribe audio, ai_captions = AI-generated commentary, none = no subtitles",
+                    help_text="speech = transcribe what is actually said (local, via Whisper). "
+                              "ai_captions = AI-written commentary, requires an OpenAI or Gemini key",
                 ),
                 EnvField(
                     "WHISPER_MODEL",
                     "Whisper model",
                     "select",
                     "medium",
-                    options=["tiny", "base", "small", "medium", "large"],
-                    help_text="Speech recognition model. Larger = more accurate but slower",
+                    options=["tiny", "base", "small", "medium", "large-v3", "large-v3-turbo", "turbo"],
+                    help_text="Speech recognition model. Larger = more accurate timing but slower. "
+                              "large-v3 fits comfortably in 16GB VRAM and is noticeably better on German",
                 ),
                 EnvField("MAX_CAPTIONS", "Max captions", "int", 0, min_value=0, max_value=50,
                          help_text="Maximum captions per clip. 0 = Auto (dynamic based on video duration)"),
-                EnvField("ENABLE_AI_CAPTION_ENHANCEMENT", "AI caption enhancement", "bool", True,
-                         help_text="Use AI to make captions more engaging and contextual"),
-                EnvField("ENABLE_CAPTION_EMOJIS", "Caption emojis", "bool", True,
-                         help_text="Add emojis to captions for extra engagement"),
+                EnvField("ENABLE_AI_CAPTION_ENHANCEMENT", "AI caption enhancement", "bool", False,
+                         help_text="Rewrite captions to be punchier. Needs an AI provider, ignored in local mode"),
+                EnvField("ENABLE_CAPTION_EMOJIS", "Caption emojis", "bool", False,
+                         help_text="Sprinkle emojis into captions. Needs an AI provider, ignored in local mode"),
+            ],
+        ),
+        EnvSection(
+            title="Caption Style & Layout",
+            expanded=True,
+            fields=[
+                EnvField(
+                    "PYCAPS_TEMPLATE",
+                    "Caption template",
+                    "select",
+                    "hype",
+                    options=["hype", "vibrant", "explosive", "fast", "classic", "minimalist",
+                             "neo-minimal", "line-focus", "word-focus", "retro-gaming", "default"],
+                    help_text="Look of the captions: font, colours and the animation of the spoken word",
+                ),
+                EnvField("SUBTITLE_MAX_LINES", "Max caption lines", "int", 2, min_value=1, max_value=5,
+                         help_text="How many lines a caption may wrap to. 1-2 keeps the frame clear; "
+                                   "more lines cover a large part of a vertical video"),
+                EnvField("SUBTITLE_MIN_LINES", "Min caption lines", "int", 1, min_value=1, max_value=5,
+                         help_text="Reserve at least this many lines, so captions do not jump vertically"),
+                EnvField("SUBTITLE_MAX_CHARS", "Max chars per caption", "int", 15, min_value=5, max_value=120,
+                         help_text="Longer text is split into the next caption. Small values give the fast, "
+                                   "word-by-word look typical for Shorts"),
+                EnvField("SUBTITLE_MIN_CHARS", "Min chars per caption", "int", 10, min_value=1, max_value=120,
+                         help_text="Avoids very short leftover captions. Must not exceed the maximum"),
+                EnvField("SUBTITLE_WIDTH_RATIO", "Caption width ratio", "float", 0.85,
+                         min_value=0.1, max_value=1.0, step=0.05,
+                         help_text="How much of the frame width captions may use before wrapping"),
+                EnvField("SUBTITLE_OVERFLOW", "When text does not fit", "select", "exceed_lines",
+                         options=["exceed_lines", "exceed_width"],
+                         help_text="exceed_lines: add another line, so the line limit above is only a target. "
+                                   "exceed_width: keep the line count and let the last line run wider"),
+                EnvField("SUBTITLE_VERTICAL_ALIGN", "Vertical position", "select", "bottom",
+                         options=["bottom", "center", "top"],
+                         help_text="Where captions sit in the frame"),
+                EnvField("SUBTITLE_VERTICAL_OFFSET", "Vertical offset", "float", -0.1,
+                         min_value=-1.0, max_value=1.0, step=0.05,
+                         help_text="Nudge captions away from the chosen edge. Negative moves up from the bottom"),
+                EnvField("PYCAPS_KEEP_SPLITTERS", "Split long captions", "bool", True,
+                         help_text="On: text is chunked by the char limits above. Off: a whole transcript block "
+                                   "is shown at once, which matches the SRT exactly but produces walls of text"),
+                EnvField(
+                    "CAPTION_STYLE",
+                    "Caption tone",
+                    "select",
+                    "auto",
+                    options=["auto", "gaming", "funny", "dramatic", "esports_playcast", "comedy_punchline",
+                             "vlog_story", "podcast_quote", "educational_explainer"],
+                    help_text="Wording style for AI-written captions. Only used in ai_captions mode",
+                ),
             ],
         ),
         EnvSection(
             title="TTS Voiceover",
             fields=[
-                EnvField("ENABLE_TTS", "Enable TTS", "bool", True,
-                         help_text="Add AI-generated voiceover narration to clips"),
+                EnvField("ENABLE_TTS", "Enable TTS", "bool", False,
+                         help_text="Overlay an AI voiceover. Off keeps the original audio, which is usually what "
+                                   "you want for gameplay, and saves VRAM and processing time"),
                 EnvField("TTS_MODEL", "TTS model", "select", "qwen", options=["qwen"],
                          help_text="Text-to-speech model (Qwen is fast and high quality)"),
+                EnvField("TTS_LANGUAGE", "Voiceover language", "select", "de",
+                         options=["de", "en", "es", "fr", "it", "pt", "nl", "pl", "ru", "ja", "ko", "zh"],
+                         help_text="Language the generated voiceover speaks"),
+                EnvField("TTS_SPEED", "Voiceover speed", "float", 1.0, min_value=0.5, max_value=2.0, step=0.05,
+                         help_text="Playback rate of the voiceover. 1.0 = normal"),
                 EnvField("TTS_DEVICE", "TTS device", "select", "cuda", options=["cuda", "cpu"],
                          help_text="cuda = GPU (fast), cpu = processor (slower but works everywhere)"),
                 EnvField(
@@ -203,7 +310,7 @@ def coerce_value(field: EnvField, raw_value: Optional[str]) -> Any:
     if raw_value is None or raw_value == "":
         return field.default
     if field.field_type == "bool":
-        return str(raw_value).lower() in ("1", "true", "yes", "on")
+        return str(raw_value).strip().lower() in TRUTHY
     if field.field_type == "int":
         try:
             return int(raw_value)
@@ -217,8 +324,18 @@ def coerce_value(field: EnvField, raw_value: Optional[str]) -> Any:
     return str(raw_value)
 
 
+TRUTHY = ("1", "true", "yes", "on")
+
+
 def normalize_value(field: EnvField, value: Any) -> str:
     if field.field_type == "bool":
+        # Values coming from load_env_values() are strings straight out of the
+        # .env file, and the string "false" is truthy in Python. Checking it
+        # directly silently flipped every disabled toggle back to true on save,
+        # including DEBUG_SKIP_ANALYSIS and DEBUG_SKIP_RENDER - which makes the
+        # pipeline skip its actual work while still reporting success.
+        if isinstance(value, str):
+            return "true" if value.strip().lower() in TRUTHY else "false"
         return "true" if value else "false"
     if value is None:
         return ""
