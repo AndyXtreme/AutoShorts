@@ -198,6 +198,18 @@ Since the image then already exists locally, Compose uses your build instead of
 pulling. The build compiles decord against CUDA in a separate stage, so expect
 it to take a while on the first run.
 
+### Updating
+
+The container runs the code baked into the image — the compose file
+deliberately does not mount the source. After pulling or rebuilding, recreate
+the container, otherwise it keeps running the old code and new settings simply
+do not appear in the UI:
+
+```bash
+docker compose pull        # or: docker build -t andyxtreme/autoshorts:latest .
+docker compose up -d       # recreates the container on a changed image
+```
+
 ### Running once without the UI
 
 ```bash
