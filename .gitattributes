@@ -1,0 +1,4 @@
+# Shell scripts must keep LF endings: the container entrypoint is executed by
+# /usr/bin/env bash, and a CRLF shebang fails with "no such file or directory".
+*.sh text eol=lf
+docker-entrypoint.sh text eol=lf
