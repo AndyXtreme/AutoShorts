@@ -165,16 +165,33 @@ The Makefile will:
 # Build the image
 docker build -t autoshorts .
 
-# Run with GPU access
-docker run --rm \
+# Serve the web UI on http://localhost:8501 (default)
+docker run -d --name autoshorts-ui \
     --gpus all \
-    -v $(pwd)/gameplay:/app/gameplay \
-    -v $(pwd)/generated:/app/generated \
-    --env-file .env \
+    --shm-size=8g \
+    -p 8501:8501 \
+    -v $(pwd):/app \
+    autoshorts
+```
+
+Mounting the whole project directory keeps settings (`.env`), inputs and
+rendered clips on the host, so nothing is lost when the container is replaced.
+
+To run the pipeline once over everything in `gameplay/` without the UI:
+
+```bash
+docker run --rm --gpus all --shm-size=8g \
+    -e MODE=batch \
+    -v $(pwd):/app \
     autoshorts
 ```
 
 > **Note**: The `--gpus all` flag is essential for NVENC and CUDA acceleration.
+
+> **Blackwell GPUs (RTX 50xx)**: these need CUDA 12.8 or newer. The Dockerfile
+> pins the base image and the PyTorch wheels accordingly — an unpinned
+> `pip install torch` resolves to a build without `sm_120` kernels and fails
+> with `CUDA error: no kernel image is available for execution on the device`.
 
 ---
 
@@ -213,6 +230,79 @@ cp .env.example .env
 
 See `.env.example` for the complete list with detailed descriptions.
 
+### Clip Selection
+
+Which moments become clips. Applied *before* anything is rendered.
+
+| Variable | UI (Settings →) | Default | Effect |
+| :--- | :--- | :--- | :--- |
+| `SCENE_LIMIT` | Core Settings → Scene limit | `4` | Clips per source video. Raise it for more coverage, then discard what you do not need |
+| `ACTION_W_AUDIO` | Action Detection → Audio weight | `0.6` | How strongly loudness peaks (gunfire, shouting, impacts) drive selection |
+| `ACTION_W_VIDEO` | Action Detection → Motion weight | `0.4` | How strongly frame-to-frame motion drives it. Only the ratio matters — raise it above the audio weight to favour visually busy moments over loud ones |
+
+### Clip Length
+
+| Variable | UI (Settings →) | Default | Effect |
+| :--- | :--- | :--- | :--- |
+| `CLIP_LENGTH_MODE` | Clip Length → Window length | `max` | `max` always takes the longest allowed window and lets dead-air removal tighten it, so runs are reproducible. `random` draws a length per clip, so reruns end at different points |
+| `MAX_SHORT_LENGTH` | Clip Length → Max short length | `59` | Upper bound of the window. The detected scene may cap it earlier |
+| `MIN_SHORT_LENGTH` | Clip Length → Min short length | `15` | How much source material is selected at minimum. Also filters out shorter scenes entirely |
+
+### Dead Air Removal
+
+Cuts stretches out of a rendered clip where nothing is said *and* nothing
+happens, then stitches the rest back together. Runs *after* rendering and
+*before* subtitles, so captions are transcribed from the final timeline.
+
+| Variable | UI (Settings →) | Default | Effect |
+| :--- | :--- | :--- | :--- |
+| `REMOVE_SILENCE` | Dead Air → Cut out dead air | `true` | Master switch |
+| `SILENCE_MIN_GAP` | Dead Air → Min gap to cut | `1.0` | Minimum pause length that gets removed. `0.5` gives the hard jump-cut style, `2.0` only strips long lulls |
+| `SILENCE_MOTION_KEEP` | Dead Air → Protect motion above | `0.5` | Threshold in standard deviations above the video's average motion. **High** → only very busy moments are protected, so the clip follows the **voice**. **Low** → little motion already counts as protected, so the clip follows the **gameplay** |
+| `SILENCE_PADDING` | Dead Air → Keep around speech | `0.15` | Breathing room kept around each word so cuts do not clip syllables |
+| `SILENCE_MIN_RESULT` | Dead Air → Min length after cutting | `8.0` | Floor for the finished clip. Cutting stops here even if more dead air remains |
+
+### Caption Layout
+
+| Variable | UI (Settings →) | Default | Effect |
+| :--- | :--- | :--- | :--- |
+| `SUBTITLE_MAX_LINES` | Caption Layout → Max caption lines | `2` | Maximum number of lines a caption wraps to |
+| `SUBTITLE_MIN_LINES` | Caption Layout → Min caption lines | `1` | Reserved lines, so captions do not jump vertically |
+| `SUBTITLE_MAX_CHARS` | Caption Layout → Max chars per caption | `15` | Where text is split into the next caption. Small values give the fast word-by-word look |
+| `SUBTITLE_MIN_CHARS` | Caption Layout → Min chars per caption | `10` | Avoids very short leftover captions |
+| `SUBTITLE_OVERFLOW` | Caption Layout → When text does not fit | `exceed_lines` | `exceed_lines` adds another line, so the line limit is only a target. `exceed_width` keeps the line count and lets the last line run wider |
+| `SUBTITLE_WIDTH_RATIO` | Caption Layout → Caption width ratio | `0.85` | How much of the frame width captions may use |
+| `SUBTITLE_VERTICAL_ALIGN` | Caption Layout → Vertical position | `bottom` | `bottom`, `center` or `top` |
+| `SUBTITLE_VERTICAL_OFFSET` | Caption Layout → Vertical offset | `-0.1` | Nudge away from the chosen edge |
+| `PYCAPS_KEEP_SPLITTERS` | Caption Layout → Split long captions | `true` | Off shows a whole transcript block at once: exact SRT boundaries, but walls of text |
+
+### How the settings interact
+
+Four pairs are easy to confuse because they sound similar but act at different
+stages of the pipeline.
+
+**`ACTION_W_VIDEO` vs. `SILENCE_MOTION_KEEP`** — both weigh motion, but at
+opposite ends. The action weights decide **where in the source** clips are
+looked for, before rendering. The motion-keep threshold decides **what survives
+inside** a clip, after rendering. Gameplay-heavy shorts want a high
+`ACTION_W_VIDEO` *and* a low `SILENCE_MOTION_KEEP`; commentary-driven shorts
+want the opposite.
+
+**`MIN_SHORT_LENGTH` vs. `SILENCE_MIN_RESULT`** — the first governs how much
+raw material is selected, the second how short the finished clip may end up.
+They are deliberately separate: select generously, cut tightly. Lowering
+`MIN_SHORT_LENGTH` to allow shorter finals would also make the pipeline accept
+thinner source windows, and it filters scenes as well.
+
+**`SUBTITLE_MAX_LINES` vs. `SUBTITLE_OVERFLOW`** — the line limit alone is only
+a target. With the default `exceed_lines`, a generous `SUBTITLE_MAX_CHARS`
+still spills onto extra lines. Set `SUBTITLE_OVERFLOW=exceed_width` for a hard
+line limit.
+
+**`MAX_SHORT_LENGTH` vs. the detected scene** — the maximum is an upper bound,
+not a target. If scene detection finds a 27-second scene, that caps the window
+regardless of a higher `MAX_SHORT_LENGTH`.
+
 ---
 
 ## 📖 Usage
@@ -224,15 +314,20 @@ See `.env.example` for the complete list with detailed descriptions.
    python run.py
    ```
 
-3. **Generated clips** are saved to `generated/`
+3. **Generated clips** are saved to `generated/<source video name>/`
 
 ### 🧭 Dashboard (Streamlit UI)
 
-Launch the local dashboard to configure settings, start jobs, and preview clips:
+Every setting documented above is editable in the dashboard, which also manages
+the input queue, starts jobs and previews the results.
 
 ```bash
 streamlit run src/dashboard/About.py
 ```
+
+In Docker the UI is the default entrypoint — see
+[Option 2: Docker](#option-2-docker-gpu-required). Videos copied into
+`gameplay/` from outside the UI appear in the queue automatically.
 
 | About | Generate | Browse |
 | :---: | :---: | :---: |
@@ -244,14 +339,26 @@ streamlit run src/dashboard/About.py
 
 ### Output Structure
 
+One folder per source video, so clips from different recordings do not
+interleave:
+
 ```text
 generated/
-├── video_name scene-0.mp4          # Rendered short clip
-├── video_name scene-0_sub.json     # Subtitle data
-├── video_name scene-0.ffmpeg.log   # Render log
-├── video_name scene-1.mp4
-└── ...
+└── video_name/
+    ├── scene-0.mp4            # Rendered short clip
+    ├── scene-0.words.json     # Whisper word-level timings
+    ├── scene-0_sub.json       # Caption layout data
+    ├── scene-0.ffmpeg.log     # Render log
+    ├── scene-1.mp4
+    └── ...
 ```
+
+Rerunning a video clears its folder first, so you always get one consistent set
+of clips rather than a mix of runs. Only files the pipeline writes (`scene-*`)
+are removed; anything else you keep in that folder is left alone.
+
+> Two source files whose names differ only by extension (`clip.mkv` and
+> `clip.mp4`) share one output folder and overwrite each other.
 
 ---
 
