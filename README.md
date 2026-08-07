@@ -146,56 +146,26 @@ AutoShorts is designed to work even when optimal components fail:
 
 ### Software
 
-- Python 3.10
-- FFmpeg 4.4.2 (for Decord compatibility)
-- CUDA Toolkit with `nvcc` (for building Decord from source)
-- System libraries: `libgl1`, `libglib2.0-0`
+- **Docker** with Compose
+- **[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)**
+- **NVIDIA driver** with CUDA 12.8 support (required for Blackwell / RTX 50xx)
+
+Everything else — Python, FFmpeg 4.4.2, the CUDA toolchain, the CUDA-enabled
+decord build and the fonts the caption renderer needs — is inside the image.
 
 ---
 
 ## 🚀 Installation
 
-### Option 1: Makefile Installation (bare metal)
-
-The Makefile handles everything automatically—environment creation, dependency installation, and building Decord with CUDA support.
-
-```bash
-git clone https://github.com/divyaprakash0426/autoshorts.git
-cd autoshorts
-
-# Run the installer (uses conda/micromamba automatically)
-make install
-
-# Setup environment variables
-cp .env.example .env
-# Edit .env and add your API keys (Gemini/OpenAI) 
-
-# Activate the environment
-overlay use .venv/bin/activate.nu    # For Nushell
-# OR
-source .venv/bin/activate            # For Bash/Zsh
-```
-
-The Makefile will:
-
-1. Download micromamba if conda/mamba is not found
-2. Create a Python 3.10 environment with FFmpeg 4.4.2
-3. Install NV Codec Headers for NVENC support
-4. Build Decord from source with CUDA enabled
-5. Install all pip requirements
-
-### Option 2: Docker (GPU Required)
-
-**This is the recommended way to run it** — the image carries a verified CUDA
-12.8 stack, the compiled decord build and the fonts the caption renderer needs.
-
-**Prerequisite**: [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) must be installed.
+AutoShorts runs in Docker. The image carries a verified CUDA 12.8 stack, the
+CUDA-enabled decord build and the fonts the caption renderer needs — all of
+which are tedious to get right on bare metal.
 
 The image is published on Docker Hub as
 [`andyxtreme/autoshorts`](https://hub.docker.com/r/andyxtreme/autoshorts)
 (`linux/amd64` — CUDA and NVENC rule out ARM).
 
-#### A — Use the prebuilt image
+### A — Use the prebuilt image
 
 You only need [docker-compose.yml](docker-compose.yml), no source code. Put it
 in a folder, create an empty settings file, and start:
@@ -212,17 +182,23 @@ docker compose up -d
 The web UI is then available at `http://<HOST-IP>:8501`. `gameplay/` and
 `generated/` are created next to the compose file on first start.
 
-#### B — Build from source
+### B — Build from source
+
+Clone this repository, then build the image under the name the compose file
+expects:
 
 ```bash
+git clone https://github.com/andyxtreme/autoshorts.git
+cd autoshorts
 docker build -t andyxtreme/autoshorts:latest .
 docker compose up -d
 ```
 
 Since the image then already exists locally, Compose uses your build instead of
-pulling.
+pulling. The build compiles decord against CUDA in a separate stage, so expect
+it to take a while on the first run.
 
-#### Running once without the UI
+### Running once without the UI
 
 ```bash
 docker compose run --rm -e MODE=batch autoshorts
@@ -361,27 +337,23 @@ regardless of a higher `MAX_SHORT_LENGTH`.
 
 ## 📖 Usage
 
-1. **Place source videos** in the `gameplay/` directory
-2. **Run the script**:
+1. **Place source videos** in the `gameplay/` directory — either by copying
+   them in directly, or by uploading them in the dashboard. Files copied in
+   from outside appear in the queue automatically.
+2. **Start the run** with *Start Processing* on the **Generate** page, or in a
+   terminal:
 
    ```bash
-   python run.py
+   docker compose run --rm -e MODE=batch autoshorts
    ```
 
 3. **Generated clips** are saved to `generated/<source video name>/`
 
 ### 🧭 Dashboard (Streamlit UI)
 
-Every setting documented above is editable in the dashboard, which also manages
-the input queue, starts jobs and previews the results.
-
-```bash
-streamlit run src/dashboard/About.py
-```
-
-In Docker the UI is the default entrypoint — see
-[Option 2: Docker](#option-2-docker-gpu-required). Videos copied into
-`gameplay/` from outside the UI appear in the queue automatically.
+The dashboard is the container's default entrypoint and is served on
+`http://<HOST-IP>:8501`. Every setting documented above is editable there, and
+it also manages the input queue, starts jobs and previews the results.
 
 | About | Generate | Browse |
 | :---: | :---: | :---: |
