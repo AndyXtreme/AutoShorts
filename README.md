@@ -1,14 +1,40 @@
-# AutoShorts
+# AutoShorts – Extended Edition (Blackwell / Web UI / Dead-Air Removal)
 
 > Automatically generate viral-ready vertical short clips from long-form gameplay footage using AI-powered scene analysis, GPU-accelerated rendering, and optional AI voiceovers.
 
+This is an extended variant of [AutoShorts](https://github.com/divyaprakash0426/autoshorts)
+by Divyaprakash Dhurandhar. It keeps the original pipeline and adds the fixes and
+features needed to run it on current hardware and to configure it without editing files.
+
 AutoShorts analyzes your gameplay videos to identify the most engaging moments—action sequences, funny fails, or highlight achievements—then automatically crops, renders, and adds subtitles or AI voiceovers to create ready-to-upload short-form content.
+
+### What's different in this edition
+
+| Area | Original | This edition |
+|---|---|---|
+| GPU support | CUDA 12.6 wheels | **CUDA 12.8**, works on Blackwell (RTX 50xx, `sm_120`) |
+| Docker build | failed (missing pkg-config path, dead clone URL) | **builds cleanly** |
+| Captions | rendered invisible (no fonts in the image) | **visible**, with word-accurate highlighting |
+| Clip audio | dropped for Matroska sources | **kept** |
+| Pauses in clips | left in | **dead-air removal** with motion protection |
+| Caption layout | baked into the template | **configurable** (lines, length, position) |
+| Configuration | `.env` by hand | **web UI** served from the container |
+| Output | one flat folder | **one folder per source video** |
 
 ![Python](https://img.shields.io/badge/python-3.10-blue)
 ![PyTorch](https://img.shields.io/badge/PyTorch-%23EE4C2C.svg?style=flat&logo=PyTorch&logoColor=white)
 ![CUDA](https://img.shields.io/badge/CUDA-12.x-green)
 ![Docker](https://img.shields.io/badge/docker-%230db7ed.svg?style=flat&logo=docker&logoColor=white)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+## Support
+
+If this edition helps you, I'd appreciate a small donation – thank you! ☕
+
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20me-FF5E5B?logo=kofi&logoColor=white)](https://ko-fi.com/andyxtreme)
+
+Please also consider supporting **Divyaprakash Dhurandhar**, who wrote the
+original AutoShorts this edition builds on – see [Credits](#-credits--license).
 
 ---
 
@@ -430,8 +456,17 @@ This project builds upon the excellent work of:
 
 ---
 
-## 📄 License
+## 📄 Credits & License
 
-This project is licensed under the [MIT License](LICENSE).
+- Original project: **[AutoShorts](https://github.com/divyaprakash0426/autoshorts)**
+  by Divyaprakash Dhurandhar – the scene analysis, GPU rendering, caption and
+  TTS pipeline are his work.
+- This edition adds GPU compatibility fixes, dead-air removal, a configurable
+  caption layout and a web UI. See
+  [What's different in this edition](#whats-different-in-this-edition).
+- License: **MIT** – see [LICENSE](LICENSE). Copyright remains with the
+  original author.
+
+Support the original author:
 
 [!["Buy Me A Coffee"](https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png)](https://www.buymeacoffee.com/divyaprakash0426)
