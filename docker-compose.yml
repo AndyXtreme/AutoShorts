@@ -22,6 +22,10 @@ services:
       #   Linux/macOS:  touch .env
       #   PowerShell:   New-Item -ItemType File .env
       - ./.env:/app/.env
+      # Downloaded models (Whisper ~1.5GB for medium, ~3GB for large-v3, plus
+      # the TTS model when enabled). Without this they are fetched again for
+      # every `docker compose run --rm`, since the image ships none of them.
+      - models:/root/.cache
 
     # Whisper and the caption renderer need more than the 64MB default
     shm_size: "8gb"
@@ -39,3 +43,6 @@ services:
     #   docker compose build
     # build:
     #   context: .
+
+volumes:
+  models:

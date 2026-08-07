@@ -212,8 +212,13 @@ docker run --rm --gpus all --shm-size=8g \
     -v $(pwd)/gameplay:/app/gameplay \
     -v $(pwd)/generated:/app/generated \
     -v $(pwd)/.env:/app/.env \
+    -v autoshorts-models:/root/.cache \
     andyxtreme/autoshorts:latest
 ```
+
+> The image ships no Whisper or TTS model — they are downloaded on first use.
+> Keep `/root/.cache` on a volume, or every `--rm` run downloads them again
+> (~1.5GB for Whisper `medium`, ~3GB for `large-v3`).
 
 > **Note**: GPU access (`--gpus all`, or the `deploy.resources` block in the
 > compose file) is essential for NVENC and CUDA acceleration.
