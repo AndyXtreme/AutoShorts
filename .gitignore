@@ -24,7 +24,11 @@ _build_*/
 # Project-specific
 gameplay/
 generated/*
+# ...except the example clips the README embeds
+!generated/showcase/
 CHALLENGE_SUBMISSION.md
 demo/
 assets/*.wav
 assets/*.png
+# Local agent/tooling config
+.claude/

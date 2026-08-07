@@ -1,5 +1,10 @@
-# Base image: PyTorch 2.6 with CUDA 12.6 (upgrade to 2.10 via pip)
-FROM pytorch/pytorch:2.6.0-cuda12.6-cudnn9-devel
+# Base image: CUDA 12.8 toolchain — required for Blackwell (sm_120, RTX 50xx);
+# the 12.6 nvcc has no sm_120 codegen, which breaks the decord build below.
+# Deliberately 2.8.0 and not 2.10.0: the 2.10 tag is Ubuntu 24.04 + Python 3.12,
+# which renames the apt packages in step 1 (t64 transition, libgl1-mesa-glx dropped)
+# and makes the cp311 FlashAttention wheel in step 7 uninstallable.
+# Torch itself is upgraded to 2.10 from the cu128 index in step 6 anyway.
+FROM pytorch/pytorch:2.8.0-cuda12.8-cudnn9-devel
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -45,7 +50,10 @@ ENV DECORD_SKIP_TAIL_FRAMES=0
 ENV NVIDIA_DRIVER_CAPABILITIES=all
 
 # 4. Install NV Codec Headers for NVENC support
-RUN git clone https://git.videolan.org/git/ffmpeg/nv-codec-headers.git && \
+# Mirrored from git.videolan.org, which drops HTTP/2 connections mid-clone.
+# HTTP/1.1 + shallow clone keeps this step reliable.
+RUN git -c http.version=HTTP/1.1 clone --depth 1 \
+        https://github.com/FFmpeg/nv-codec-headers.git && \
     cd nv-codec-headers && \
     make install && \
     cd .. && rm -rf nv-codec-headers
@@ -60,8 +68,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN ln -sf /usr/lib/x86_64-linux-gnu/libnvcuvid.so.1 /usr/lib/x86_64-linux-gnu/libnvcuvid.so && \
     ln -sf /usr/lib/x86_64-linux-gnu/libnvidia-encode.so.1 /usr/lib/x86_64-linux-gnu/libnvidia-encode.so
 
-# 6. Upgrade PyTorch to 2.10 with CUDA 12.6
-RUN pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126 && \
+# 6. PyTorch from the cu128 wheels (cu126 wheels ship no sm_120 kernels).
+# Versions are pinned deliberately: the cu128 index also carries 2.11, and an
+# unpinned install resolves to it, which then fails to load the FlashAttention
+# wheel below (built as cu128torch2.10) with an undefined-symbol ImportError.
+RUN pip install --no-cache-dir \
+        torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 \
+        --index-url https://download.pytorch.org/whl/cu128 && \
     pip install --no-cache-dir torchcodec
 
 # 7. Install FlashAttention 2 (prebuilt wheel for torch 2.10)
@@ -76,11 +89,32 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 9. Install Playwright browsers for PyCaps
 RUN playwright install chromium
 
+# 9b. Fonts for the Chromium that PyCaps renders captions in.
+# The base image ships no /usr/share/fonts, no /etc/fonts and no fontconfig,
+# so Chromium has zero usable fonts: every text node measures 0x0, each word
+# screenshot collapses to its CSS padding, and the captions come out invisible
+# while the pipeline still reports success. The conda fonts in /opt/conda/fonts
+# are not visible to Chromium — it uses the system fontconfig.
+# Noto Color Emoji is needed for the emoji the caption templates inject.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    fontconfig \
+    fonts-liberation \
+    fonts-dejavu-core \
+    fonts-noto-color-emoji \
+    && fc-cache -f \
+    && rm -rf /var/lib/apt/lists/*
+
 # 10. Build Decord with CUDA support
+# FFmpeg comes from conda, whose lib/pkgconfig is not on the default pkg-config
+# search path — without this, decord's FFmpeg.cmake aborts with "Unable to find
+# FFMPEG automatically". Set inline rather than as a global ENV so the cached
+# layers above (FlashAttention, requirements, Playwright) stay valid.
 RUN git clone --recursive https://github.com/dmlc/decord && \
     cd decord && \
     mkdir build && cd build && \
+    PKG_CONFIG_PATH=/opt/conda/lib/pkgconfig \
     cmake .. -DUSE_CUDA=ON -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_PREFIX_PATH=/opt/conda \
     -DCUDA_nvcuvid_LIBRARY=/usr/lib/x86_64-linux-gnu/libnvcuvid.so && \
     make -j$(nproc) && \
     cd ../python && \
@@ -109,4 +143,11 @@ RUN mkdir -p gameplay generated assets
 # Verify installations
 RUN python -c "import torch; import flash_attn; print(f'PyTorch {torch.__version__}, FlashAttention {flash_attn.__version__}')"
 
-CMD ["python", "run.py"]
+# 15. Entrypoint. The sed strips CRLF so the script still runs when the build
+# context comes from a Windows checkout.
+RUN sed -i 's/\r$//' /app/docker-entrypoint.sh && chmod +x /app/docker-entrypoint.sh
+
+# Streamlit web UI
+EXPOSE 8501
+
+ENTRYPOINT ["/app/docker-entrypoint.sh"]

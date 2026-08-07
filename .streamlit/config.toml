@@ -4,3 +4,21 @@ backgroundColor = "#0F1117"
 secondaryBackgroundColor = "#1E2030"
 textColor = "#F1F5F9"
 font = "sans serif"
+
+[server]
+# Container defaults: listen on all interfaces, no browser to open.
+address = "0.0.0.0"
+port = 8501
+headless = true
+fileWatcherType = "none"
+
+# Streamlit has no "unlimited" upload setting - the limit is an integer in MB,
+# so this is 1 TB, i.e. effectively no cap. Note that browser uploads are held
+# in RAM by Streamlit, so multi-gigabyte files are limited by memory rather
+# than by this number. For large source footage, copy straight into gameplay/
+# in the mounted project folder; the UI picks it up automatically.
+maxUploadSize = 1048576
+maxMessageSize = 1048576
+
+[browser]
+gatherUsageStats = false
