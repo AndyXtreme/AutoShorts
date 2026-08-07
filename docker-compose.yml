@@ -1,0 +1,41 @@
+services:
+  autoshorts:
+    image: andyxtreme/autoshorts:latest
+    container_name: autoshorts
+    restart: unless-stopped
+
+    # Web UI. Change only the left-hand side to use a different host port.
+    ports:
+      - "8501:8501"
+
+    # ui = Streamlit dashboard (default), batch = process gameplay/ once and exit
+    environment:
+      MODE: ui
+
+    volumes:
+      # Source videos, dropped in here from anywhere - the UI picks them up
+      - ./gameplay:/app/gameplay
+      # Finished clips, one subfolder per source video
+      - ./generated:/app/generated
+      # Settings. Must exist as a FILE before the first start, otherwise Docker
+      # creates a directory with this name and the container cannot write it:
+      #   Linux/macOS:  touch .env
+      #   PowerShell:   New-Item -ItemType File .env
+      - ./.env:/app/.env
+
+    # Whisper and the caption renderer need more than the 64MB default
+    shm_size: "8gb"
+
+    # Requires the NVIDIA Container Toolkit on the host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    # Build from source instead of pulling the published image:
+    #   docker compose build
+    # build:
+    #   context: .

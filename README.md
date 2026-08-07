@@ -24,7 +24,7 @@ AutoShorts analyzes your gameplay videos to identify the most engaging moments�
 ![Python](https://img.shields.io/badge/python-3.10-blue)
 ![PyTorch](https://img.shields.io/badge/PyTorch-%23EE4C2C.svg?style=flat&logo=PyTorch&logoColor=white)
 ![CUDA](https://img.shields.io/badge/CUDA-12.x-green)
-![Docker](https://img.shields.io/badge/docker-%230db7ed.svg?style=flat&logo=docker&logoColor=white)
+[![Docker Hub](https://img.shields.io/badge/docker%20hub-andyxtreme%2Fautoshorts-%230db7ed?logo=docker&logoColor=white)](https://hub.docker.com/r/andyxtreme/autoshorts)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ## Support
@@ -118,7 +118,8 @@ AutoShorts automatically adapts its editing style, captions, and voiceover perso
 
 ### 📐 Smart Video Processing
 
-- Scenes ranked by combined action score (audio 0.6 + video 0.4 weights)
+- Scenes ranked by combined action score (audio/motion weighting configurable)
+- Dead-air removal: pauses without speech *or* motion are cut out of the clip
 - Configurable aspect ratio (default 9:16 for TikTok/Shorts/Reels)
 - Smart cropping with optional blurred background for non-vertical footage
 - Retry logic during rendering to avoid spurious failures
@@ -154,7 +155,7 @@ AutoShorts is designed to work even when optimal components fail:
 
 ## 🚀 Installation
 
-### Option 1: Makefile Installation (Recommended)
+### Option 1: Makefile Installation (bare metal)
 
 The Makefile handles everything automatically—environment creation, dependency installation, and building Decord with CUDA support.
 
@@ -185,39 +186,66 @@ The Makefile will:
 
 ### Option 2: Docker (GPU Required)
 
+**This is the recommended way to run it** — the image carries a verified CUDA
+12.8 stack, the compiled decord build and the fonts the caption renderer needs.
+
 **Prerequisite**: [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) must be installed.
 
-```bash
-# Build the image
-docker build -t autoshorts .
+The image is published on Docker Hub as
+[`andyxtreme/autoshorts`](https://hub.docker.com/r/andyxtreme/autoshorts)
+(`linux/amd64` — CUDA and NVENC rule out ARM).
 
-# Serve the web UI on http://localhost:8501 (default)
-docker run -d --name autoshorts-ui \
-    --gpus all \
-    --shm-size=8g \
-    -p 8501:8501 \
-    -v $(pwd):/app \
-    autoshorts
+#### A — Use the prebuilt image
+
+You only need [docker-compose.yml](docker-compose.yml), no source code. Put it
+in a folder, create an empty settings file, and start:
+
+```bash
+touch .env            # PowerShell: New-Item -ItemType File .env
+docker compose up -d
 ```
 
-Mounting the whole project directory keeps settings (`.env`), inputs and
-rendered clips on the host, so nothing is lost when the container is replaced.
+> The `.env` **must exist as a file** before the first start. Docker otherwise
+> creates a *directory* with that name, and the container cannot write its
+> settings.
 
-To run the pipeline once over everything in `gameplay/` without the UI:
+The web UI is then available at `http://<HOST-IP>:8501`. `gameplay/` and
+`generated/` are created next to the compose file on first start.
+
+#### B — Build from source
+
+```bash
+docker build -t andyxtreme/autoshorts:latest .
+docker compose up -d
+```
+
+Since the image then already exists locally, Compose uses your build instead of
+pulling.
+
+#### Running once without the UI
+
+```bash
+docker compose run --rm -e MODE=batch autoshorts
+```
+
+Or without Compose:
 
 ```bash
 docker run --rm --gpus all --shm-size=8g \
     -e MODE=batch \
-    -v $(pwd):/app \
-    autoshorts
+    -v $(pwd)/gameplay:/app/gameplay \
+    -v $(pwd)/generated:/app/generated \
+    -v $(pwd)/.env:/app/.env \
+    andyxtreme/autoshorts:latest
 ```
 
-> **Note**: The `--gpus all` flag is essential for NVENC and CUDA acceleration.
+> **Note**: GPU access (`--gpus all`, or the `deploy.resources` block in the
+> compose file) is essential for NVENC and CUDA acceleration.
 
-> **Blackwell GPUs (RTX 50xx)**: these need CUDA 12.8 or newer. The Dockerfile
-> pins the base image and the PyTorch wheels accordingly — an unpinned
-> `pip install torch` resolves to a build without `sm_120` kernels and fails
-> with `CUDA error: no kernel image is available for execution on the device`.
+> **Blackwell GPUs (RTX 50xx)**: these need CUDA 12.8 or newer. The image is
+> built on a CUDA 12.8 base whose PyTorch carries `sm_120` kernels — an
+> unpinned `pip install torch` resolves to a build without them and fails with
+> `CUDA error: no kernel image is available for execution on the device`.
 
 ---
 
