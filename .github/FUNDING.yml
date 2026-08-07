@@ -1,0 +1,4 @@
+# Adds the "Sponsor" button to the repository page.
+# Recognised keys include: github, patreon, open_collective, ko_fi, liberapay,
+# buy_me_a_coffee, polar, thanks_dev, custom.
+ko_fi: andyxtreme
