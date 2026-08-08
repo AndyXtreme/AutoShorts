@@ -2366,6 +2366,13 @@ def process_video(video_file: Path, config: ProcessingConfig, output_dir: Path) 
             logging.info("AI analysis disabled or no scenes. Using heuristic ranking.")
         final_scene_list = sorted_processed_scene_list[:config.scene_limit]
 
+    # Number the clips in the order they occur in the source video. The ranking
+    # decided *which* scenes make the cut; keeping that order in the file names
+    # too means scene-0 can sit twenty minutes after scene-1, which is confusing
+    # when reviewing the output.
+    if final_scene_list:
+        final_scene_list = sorted(final_scene_list, key=lambda s: s[0].get_seconds())
+
     # Track rendered clips with their detected categories and render metadata for subtitle/TTS processing
     # Format: (clip_path, detected_category, render_meta_dict)
     rendered_clips: List[Tuple[Path, str, Optional[dict]]] = []

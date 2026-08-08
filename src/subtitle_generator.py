@@ -185,18 +185,32 @@ def _speech_regions(audio_path: Path) -> Optional[List[tuple]]:
 
     padding = _env_float("VAD_PADDING", 0.3)
     merge_gap = _env_float("VAD_MERGE_GAP", 0.5)
+    max_region = _env_float("VAD_MAX_REGION", 10.0)
+    min_region = _env_float("VAD_MIN_REGION", 0.5)
 
     regions = []
     for stamp in stamps:
         start = max(0.0, float(stamp["start"]) - padding)
         end = float(stamp["end"]) + padding
         # Merge neighbours: a region per breath would give Whisper too little
-        # context to recognise words reliably.
-        if regions and start - regions[-1][1] <= merge_gap:
+        # context to recognise words reliably. But stop merging before the
+        # region gets long - chained into a 15s block the model starts
+        # repeating itself ("Aber eigentlich... Aber eigentlich") and its word
+        # alignment drifts by a second or more.
+        if (regions
+                and start - regions[-1][1] <= merge_gap
+                and (max_region <= 0 or end - regions[-1][0] <= max_region)):
             regions[-1] = (regions[-1][0], end)
         else:
             regions.append((start, end))
-    return regions
+
+    # A very short region is usually a game noise the detector mistook for
+    # speech. Transcribed on its own it invites hallucination - one second of
+    # Halo background produced Korean characters.
+    kept = [r for r in regions if r[1] - r[0] >= min_region]
+    if len(kept) < len(regions):
+        logging.info(f"Skipped {len(regions) - len(kept)} speech region(s) shorter than {min_region}s.")
+    return kept
 
 
 def _detect_language(model, full_wav: Path, regions, tmpdir, ffmpeg) -> Optional[str]:
