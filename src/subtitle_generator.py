@@ -213,6 +213,65 @@ def _speech_regions(audio_path: Path) -> Optional[List[tuple]]:
     return kept
 
 
+# Scripts that cannot legitimately appear in a Latin-script transcript. Whisper
+# falls back to these when it hallucinates on noise - one second of game
+# background produced Korean characters in a German recording.
+_FOREIGN_SCRIPT_RANGES = (
+    (0x0370, 0x03FF),  # Greek
+    (0x0400, 0x04FF),  # Cyrillic
+    (0x0590, 0x05FF),  # Hebrew
+    (0x0600, 0x06FF),  # Arabic
+    (0x0900, 0x097F),  # Devanagari
+    (0x0E00, 0x0E7F),  # Thai
+    (0x1100, 0x11FF),  # Hangul Jamo
+    (0x3040, 0x30FF),  # Hiragana / Katakana
+    (0x3400, 0x9FFF),  # CJK
+    (0xAC00, 0xD7AF),  # Hangul syllables
+    (0xF900, 0xFAFF),  # CJK compatibility
+)
+
+_LATIN_SCRIPT_LANGUAGES = {
+    "de", "en", "es", "fr", "it", "pt", "nl", "pl", "sv", "da", "no", "fi",
+    "cs", "sk", "sl", "hr", "hu", "ro", "tr", "id", "ms", "vi", "ca", "gl", "et", "lv", "lt",
+}
+
+
+def _has_foreign_script(text: str) -> bool:
+    return any(
+        any(low <= ord(char) <= high for low, high in _FOREIGN_SCRIPT_RANGES)
+        for char in text
+    )
+
+
+def _drop_foreign_script(segments: list, language: Optional[str]) -> list:
+    """Remove words written in a script the target language does not use.
+
+    Only meaningful once the language is known and Latin-script: a German
+    transcript never legitimately contains Hangul or CJK, so such a word is a
+    hallucination on noise rather than something that was said.
+    """
+    if not language or language.lower() not in _LATIN_SCRIPT_LANGUAGES:
+        return segments
+    if os.getenv("WHISPER_DROP_FOREIGN_SCRIPT", "true").lower() not in ("1", "true", "yes", "on"):
+        return segments
+
+    cleaned = []
+    dropped = 0
+    for segment in segments:
+        words = [w for w in (segment.get("words") or []) if not _has_foreign_script(str(w.get("word", "")))]
+        dropped += len(segment.get("words") or []) - len(words)
+        if not words:
+            continue
+        text = segment.get("text", "")
+        if _has_foreign_script(text):
+            text = "".join(str(w.get("word", "")) for w in words)
+        cleaned.append({**segment, "words": words, "text": text})
+
+    if dropped:
+        logging.info(f"Dropped {dropped} hallucinated word(s) written in another script.")
+    return cleaned
+
+
 def _detect_language(model, full_wav: Path, regions, tmpdir, ffmpeg) -> Optional[str]:
     """Determine the spoken language once, for the whole clip.
 
@@ -320,6 +379,7 @@ def _transcribe_speech_regions(model, video_path: Path) -> Optional[dict]:
                     "words": words,
                 })
 
+    segments = _drop_foreign_script(segments, language)
     segments.sort(key=lambda s: s["start"])
     text = " ".join(s.get("text", "").strip() for s in segments).strip()
     logging.info(f"Transcribed {len(regions)} speech region(s) separately.")

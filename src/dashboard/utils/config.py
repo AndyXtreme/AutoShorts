@@ -188,6 +188,18 @@ def get_schema() -> List[EnvSection]:
                                    "Whisper decodes in 30-second windows and mis-times or drops quiet speech "
                                    "when loud game audio shares the window. Slower, but catches lines that "
                                    "are otherwise lost"),
+                EnvField("WHISPER_DROP_FOREIGN_SCRIPT", "Drop foreign-script words", "bool", True,
+                         help_text="Remove words written in a script the chosen language does not use. Whisper "
+                                   "falls back to Korean or CJK characters when it hallucinates on game noise; "
+                                   "those can never be something you actually said"),
+                EnvField("VAD_MAX_REGION", "Max speech region (s)", "float", 10.0,
+                         min_value=2.0, max_value=30.0, step=1.0,
+                         help_text="Stop merging speech regions at this length. Over roughly 15s Whisper starts "
+                                   "repeating itself and its word timing drifts"),
+                EnvField("VAD_MIN_REGION", "Min speech region (s)", "float", 0.5,
+                         min_value=0.0, max_value=3.0, step=0.1,
+                         help_text="Skip regions shorter than this - usually game noise mistaken for speech. "
+                                   "Do not raise it far: a short interjection like 'Ups' is only half a second"),
                 EnvField("VAD_PADDING", "Speech padding (s)", "float", 0.3, min_value=0.0, max_value=2.0, step=0.1,
                          help_text="Extra audio kept around each detected speech region, so words are not "
                                    "clipped at the edges"),
