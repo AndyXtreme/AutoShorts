@@ -108,15 +108,24 @@ def transcribe_audio(video_path: Path, output_srt: Optional[Path] = None) -> Pat
         
         # Load model
         model = whisper.load_model(model_name)
-        
-        # Transcribe
-        result = model.transcribe(
-            str(video_path),
-            task="transcribe",
-            verbose=False,
-            word_timestamps=True  # Enable word-level timestamps for PyCaps
-        )
-        
+
+        result = None
+        if _use_vad():
+            result = _transcribe_speech_regions(model, video_path)
+
+        if result is None:
+            # condition_on_previous_text=False: with loud game audio the model
+            # otherwise lets its own earlier output steer the decoding and drops
+            # the tail of a clip. Measured on gameplay footage: 48 words ending
+            # at 36.6s with it on, 51 words ending at 41.2s with it off.
+            result = model.transcribe(
+                str(video_path),
+                task="transcribe",
+                verbose=False,
+                word_timestamps=True,  # Enable word-level timestamps for PyCaps
+                condition_on_previous_text=False,
+            )
+
         # Generate SRT content
         srt_content = _generate_srt(result)
 
@@ -141,6 +150,166 @@ def transcribe_audio(video_path: Path, output_srt: Optional[Path] = None) -> Pat
     except Exception as e:
         logging.error(f"Transcription failed: {e}")
         raise
+
+
+def _use_vad() -> bool:
+    return os.getenv("WHISPER_USE_VAD", "true").lower() in ("1", "true", "yes", "on")
+
+
+def _speech_regions(audio_path: Path) -> Optional[List[tuple]]:
+    """Find the stretches that actually contain speech.
+
+    Whisper decodes in 30-second windows. With loud game audio in the same
+    window it mis-times quiet speech or discards it as non-speech: on real
+    gameplay footage an "Ups" spoken at 0.4s was placed at 3.9s, and a "komm
+    her" at 40.8s vanished entirely - both were transcribed correctly once
+    handed over in isolation. A voice activity detector finds those stretches
+    so each can be transcribed on its own.
+    """
+    try:
+        from silero_vad import load_silero_vad, read_audio, get_speech_timestamps
+    except ImportError:
+        logging.warning("silero-vad not installed; transcribing the whole clip at once.")
+        return None
+
+    try:
+        model = load_silero_vad()
+        wav = read_audio(str(audio_path), sampling_rate=16000)
+        stamps = get_speech_timestamps(wav, model, sampling_rate=16000, return_seconds=True)
+    except Exception as e:
+        logging.warning(f"Voice activity detection failed ({e}); transcribing the whole clip at once.")
+        return None
+
+    if not stamps:
+        return []
+
+    padding = _env_float("VAD_PADDING", 0.3)
+    merge_gap = _env_float("VAD_MERGE_GAP", 0.5)
+
+    regions = []
+    for stamp in stamps:
+        start = max(0.0, float(stamp["start"]) - padding)
+        end = float(stamp["end"]) + padding
+        # Merge neighbours: a region per breath would give Whisper too little
+        # context to recognise words reliably.
+        if regions and start - regions[-1][1] <= merge_gap:
+            regions[-1] = (regions[-1][0], end)
+        else:
+            regions.append((start, end))
+    return regions
+
+
+def _detect_language(model, full_wav: Path, regions, tmpdir, ffmpeg) -> Optional[str]:
+    """Determine the spoken language once, for the whole clip.
+
+    Uses the longest speech region rather than the opening seconds - the start
+    of a clip is often game audio only, and language detection on noise is a
+    coin flip. Set WHISPER_LANGUAGE to skip detection entirely.
+    """
+    configured = os.getenv("WHISPER_LANGUAGE", "").strip()
+    if configured:
+        logging.info(f"Transcribing as '{configured}' (WHISPER_LANGUAGE).")
+        return configured
+
+    import subprocess
+
+    try:
+        import whisper
+
+        start, end = max(regions, key=lambda r: r[1] - r[0])
+        sample = Path(tmpdir) / "lang.wav"
+        cut = subprocess.run(
+            [ffmpeg, "-y", "-v", "error", "-ss", f"{start:.3f}", "-to", f"{end:.3f}",
+             "-i", str(full_wav), str(sample)],
+            capture_output=True, text=True,
+        )
+        source = sample if cut.returncode == 0 and sample.exists() else full_wav
+
+        audio = whisper.pad_or_trim(whisper.load_audio(str(source)))
+        mel = whisper.log_mel_spectrogram(audio, getattr(model.dims, "n_mels", 80)).to(model.device)
+        _, probabilities = model.detect_language(mel)
+        language = max(probabilities, key=probabilities.get)
+        logging.info(f"Detected language for the whole clip: {language}")
+        return language
+    except Exception as e:
+        logging.warning(f"Language detection failed ({e}); each region will decide for itself.")
+        return None
+
+
+def _transcribe_speech_regions(model, video_path: Path) -> Optional[dict]:
+    """Transcribe each speech region separately and stitch the results together.
+
+    Returns a result shaped like Whisper's own, with all times mapped back onto
+    the clip's timeline, or None if the VAD is unavailable.
+    """
+    import subprocess
+    import tempfile
+
+    ffmpeg = os.getenv("FFMPEG_BINARY", "ffmpeg")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        full_wav = Path(tmpdir) / "full.wav"
+        extract = subprocess.run(
+            [ffmpeg, "-y", "-v", "error", "-i", str(video_path),
+             "-vn", "-ac", "1", "-ar", "16000", str(full_wav)],
+            capture_output=True, text=True,
+        )
+        if extract.returncode != 0 or not full_wav.exists():
+            logging.warning("Could not extract audio for VAD; transcribing the whole clip at once.")
+            return None
+
+        regions = _speech_regions(full_wav)
+        if regions is None:
+            return None
+        if not regions:
+            logging.info("No speech detected in this clip.")
+            return {"text": "", "segments": []}
+
+        # Detect the language once and impose it on every region. Left to decide
+        # per region, Whisper guesses from a second or two of audio and gets it
+        # wrong: on one clip three of eight regions came back as English in an
+        # otherwise German recording, producing nonsense words.
+        language = _detect_language(model, full_wav, regions, tmpdir, ffmpeg)
+
+        segments = []
+        for index, (start, end) in enumerate(regions):
+            piece = Path(tmpdir) / f"part{index}.wav"
+            cut = subprocess.run(
+                [ffmpeg, "-y", "-v", "error", "-ss", f"{start:.3f}",
+                 "-to", f"{end:.3f}", "-i", str(full_wav), str(piece)],
+                capture_output=True, text=True,
+            )
+            if cut.returncode != 0 or not piece.exists():
+                continue
+
+            piece_result = model.transcribe(
+                str(piece),
+                task="transcribe",
+                verbose=False,
+                word_timestamps=True,
+                condition_on_previous_text=False,
+                language=language,
+            )
+
+            for segment in piece_result.get("segments", []):
+                words = []
+                for word in segment.get("words") or []:
+                    words.append({
+                        **word,
+                        "start": float(word["start"]) + start,
+                        "end": float(word["end"]) + start,
+                    })
+                segments.append({
+                    **segment,
+                    "start": float(segment.get("start", 0.0)) + start,
+                    "end": float(segment.get("end", 0.0)) + start,
+                    "words": words,
+                })
+
+    segments.sort(key=lambda s: s["start"])
+    text = " ".join(s.get("text", "").strip() for s in segments).strip()
+    logging.info(f"Transcribed {len(regions)} speech region(s) separately.")
+    return {"text": text, "segments": segments}
 
 
 def word_timings_path(srt_path: Path) -> Path:

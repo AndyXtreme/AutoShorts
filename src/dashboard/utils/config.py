@@ -179,6 +179,22 @@ def get_schema() -> List[EnvSection]:
                     help_text="Speech recognition model. Larger = more accurate timing but slower. "
                               "large-v3 fits comfortably in 16GB VRAM and is noticeably better on German",
                 ),
+                EnvField("WHISPER_LANGUAGE", "Spoken language", "select", "",
+                         options=["", "de", "en", "es", "fr", "it", "pt", "nl", "pl", "ru", "ja", "ko", "zh"],
+                         help_text="Language of your commentary. Empty detects it once per clip from the "
+                                   "longest speech region. Set it explicitly if detection ever picks wrong"),
+                EnvField("WHISPER_USE_VAD", "Detect speech first", "bool", True,
+                         help_text="Find the stretches that contain speech and transcribe each on its own. "
+                                   "Whisper decodes in 30-second windows and mis-times or drops quiet speech "
+                                   "when loud game audio shares the window. Slower, but catches lines that "
+                                   "are otherwise lost"),
+                EnvField("VAD_PADDING", "Speech padding (s)", "float", 0.3, min_value=0.0, max_value=2.0, step=0.1,
+                         help_text="Extra audio kept around each detected speech region, so words are not "
+                                   "clipped at the edges"),
+                EnvField("VAD_MERGE_GAP", "Merge speech within (s)", "float", 0.5,
+                         min_value=0.0, max_value=5.0, step=0.1,
+                         help_text="Join speech regions closer than this. One region per breath would leave "
+                                   "Whisper too little context to recognise words"),
                 EnvField("MAX_CAPTIONS", "Max captions", "int", 0, min_value=0, max_value=50,
                          help_text="Maximum captions per clip. 0 = Auto (dynamic based on video duration)"),
                 EnvField("ENABLE_AI_CAPTION_ENHANCEMENT", "AI caption enhancement", "bool", False,

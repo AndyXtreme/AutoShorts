@@ -21,6 +21,11 @@ openai>=1.0.0
 
 # Subtitles
 openai-whisper
+# Voice activity detection. Whisper decodes in 30s windows and mis-times or
+# drops quiet speech when loud game audio shares the window; this finds the
+# speech regions so each can be transcribed on its own. Model ships in the
+# package, no download at runtime.
+silero-vad
 pycaps[all] @ git+https://github.com/francozanardi/pycaps.git
 nest_asyncio>=1.6.0  # Fix Playwright async/sync conflict
 
