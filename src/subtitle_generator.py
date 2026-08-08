@@ -376,6 +376,12 @@ def _run_pycaps_worker(video_path_str: str, srt_path_str: str, output_path_str: 
                     print(f"Could not read word timings {path}: {e}")
                     return None
 
+                # A caption block stays on screen from its first word to its
+                # last, so a block that spans a speech pause shows words seconds
+                # before they are spoken. The character splitter downstream only
+                # cuts by length and never by time, so split on gaps here.
+                gap_limit = _env_float("SUBTITLE_SPLIT_GAP", 0.7)
+
                 document = Document()
                 word_count = 0
                 for entry in data.get("segments", []):
@@ -383,25 +389,48 @@ def _run_pycaps_worker(video_path_str: str, srt_path_str: str, output_path_str: 
                     if not words:
                         continue
 
-                    segment_time = TimeFragment(start=entry["start"], end=entry["end"])
-                    segment = Segment(time=segment_time)
-                    line = Line(time=segment_time)
-                    segment.lines.add(line)
+                    groups: List[list] = []
+                    current: list = []
+                    for w in words:
+                        if current and gap_limit > 0:
+                            if float(w["start"]) - float(current[-1]["end"]) > gap_limit:
+                                groups.append(current)
+                                current = []
+                        current.append(w)
+                    if current:
+                        groups.append(current)
 
-                    for i, w in enumerate(words):
-                        start = float(w["start"])
-                        end = float(w["end"])
-                        # Whisper can emit zero-length or inverted spans on very
-                        # short words; give them a minimum so the clip is not
-                        # dropped by SubtitleClipsGenerator (it skips end <= start).
-                        if end <= start:
-                            end = start + 0.05
-                        line.words.add(self._build_word(w["text"], start, end, i, len(words)))
-                        word_count += 1
+                    for group in groups:
+                        spans = []
+                        cursor = 0.0
+                        for i, w in enumerate(group):
+                            start = float(w["start"])
+                            end = float(w["end"])
+                            # Whisper emits zero-length spans for short words, and
+                            # sometimes several in a row carry the exact same
+                            # timestamp. Left as is they would all light up at
+                            # once. Give each one room up to the next word, and
+                            # keep them in sequence so the highlight never runs
+                            # backwards or marks two words at the same time.
+                            start = max(start, cursor)
+                            if end <= start:
+                                following = float(group[i + 1]["start"]) if i + 1 < len(group) else start + 0.30
+                                end = min(start + 0.30, max(start + 0.08, following))
+                            cursor = end
+                            spans.append((w["text"], start, end))
 
-                    line.structure_tags.add(Tag(name="last-line-in-segment"))
-                    segment.structure_tags.add(Tag(name="segment"))
-                    document.segments.add(segment)
+                        segment_time = TimeFragment(start=spans[0][1], end=spans[-1][2])
+                        segment = Segment(time=segment_time)
+                        line = Line(time=segment_time)
+                        segment.lines.add(line)
+
+                        for i, (text, start, end) in enumerate(spans):
+                            line.words.add(self._build_word(text, start, end, i, len(spans)))
+                            word_count += 1
+
+                        line.structure_tags.add(Tag(name="last-line-in-segment"))
+                        segment.structure_tags.add(Tag(name="segment"))
+                        document.segments.add(segment)
 
                 if not document.segments:
                     return None
@@ -537,6 +566,54 @@ def _run_pycaps_worker(video_path_str: str, srt_path_str: str, output_path_str: 
             SplitIntoSentencesSplitter,
         )
         from pycaps.layout import VerticalAlignment, VerticalAlignmentType, TextOverflowStrategy
+        from pycaps.transcriber.splitter.base_segment_splitter import BaseSegmentSplitter
+
+        class SplitOnPauseSplitter(BaseSegmentSplitter):
+            """Break a caption wherever the speaker pauses.
+
+            A caption is on screen from its first word to its last, so a block
+            spanning a pause shows words seconds before they are spoken. None of
+            the built-in splitters look at time: the sentence splitter groups by
+            punctuation and happily merges across a two-second silence, and the
+            character splitter only counts letters. This one runs last and undoes
+            those merges wherever the gap is audible.
+            """
+
+            def __init__(self, gap: float):
+                self._gap = gap
+
+            def split(self, document) -> None:
+                new_segments = []
+                for segment in document.segments:
+                    words = list(segment.lines[0].words) if segment.lines else []
+                    if len(words) < 2:
+                        new_segments.append(segment)
+                        continue
+
+                    groups = []
+                    current = [words[0]]
+                    for previous, word in zip(words, words[1:]):
+                        if word.time.start - previous.time.end > self._gap:
+                            groups.append(current)
+                            current = []
+                        current.append(word)
+                    groups.append(current)
+
+                    if len(groups) == 1:
+                        new_segments.append(segment)
+                        continue
+
+                    for group in groups:
+                        time = TimeFragment(start=group[0].time.start, end=group[-1].time.end)
+                        new_segment = Segment(time=time)
+                        new_line = Line(time=time)
+                        new_line.words.set_all(group)
+                        new_line.structure_tags.add(Tag(name="last-line-in-segment"))
+                        new_segment.lines.add(new_line)
+                        new_segment.structure_tags.add(Tag(name="segment"))
+                        new_segments.append(new_segment)
+
+                document.segments.set_all(new_segments)
 
         pipeline_obj = getattr(builder, "_caps_pipeline", None)
         keep_splitters = os.getenv("PYCAPS_KEEP_SPLITTERS", "true").lower() in ("true", "1", "yes")
@@ -558,7 +635,12 @@ def _run_pycaps_worker(video_path_str: str, srt_path_str: str, output_path_str: 
                 pipeline_obj._segment_splitters = []
             builder.add_segment_splitter(SplitIntoSentencesSplitter())
             builder.add_segment_splitter(LimitByCharsSplitter(max_chars, min_chars))
-            print(f"Caption splitting: {min_chars}-{max_chars} chars per segment.")
+
+            # Last, so it also undoes merges the two above made across a pause.
+            split_gap = _env_float("SUBTITLE_SPLIT_GAP", 0.7)
+            if split_gap > 0:
+                builder.add_segment_splitter(SplitOnPauseSplitter(split_gap))
+            print(f"Caption splitting: {min_chars}-{max_chars} chars, break on {split_gap}s pause.")
 
         max_lines = _env_int("SUBTITLE_MAX_LINES", 2)
         min_lines = _env_int("SUBTITLE_MIN_LINES", 1)

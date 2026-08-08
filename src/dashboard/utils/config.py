@@ -214,6 +214,11 @@ def get_schema() -> List[EnvSection]:
                 EnvField("SUBTITLE_MAX_CHARS", "Max chars per caption", "int", 15, min_value=5, max_value=120,
                          help_text="Longer text is split into the next caption. Small values give the fast, "
                                    "word-by-word look typical for Shorts"),
+                EnvField("SUBTITLE_SPLIT_GAP", "Split on pause (s)", "float", 0.7,
+                         min_value=0.0, max_value=5.0, step=0.1,
+                         help_text="Start a new caption when the speaker pauses this long. A caption stays on "
+                                   "screen from its first word to its last, so without this a block spanning a "
+                                   "pause shows words seconds before they are spoken. 0 disables it"),
                 EnvField("SUBTITLE_MIN_CHARS", "Min chars per caption", "int", 10, min_value=1, max_value=120,
                          help_text="Avoids very short leftover captions. Must not exceed the maximum"),
                 EnvField("SUBTITLE_WIDTH_RATIO", "Caption width ratio", "float", 0.85,
