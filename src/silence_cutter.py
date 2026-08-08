@@ -157,6 +157,30 @@ def _select_gaps_to_cut(gaps: Sequence[Span], duration: float, min_gap: float, f
     return sorted(chosen)
 
 
+def _keep_edges(to_cut: Sequence[Span], duration: float, padding: float) -> List[Span]:
+    """Leave a little air at the very start and end of the clip.
+
+    Cutting the leading and trailing silence flush makes the clip begin and end
+    on the exact frame a word starts or stops, which reads as an abrupt cut.
+    Those two gaps are shortened rather than removed.
+    """
+    if padding <= 0:
+        return list(to_cut)
+
+    trimmed: List[Span] = []
+    for start, end in to_cut:
+        if start <= 0.001:                 # leading silence: keep the tail of it
+            start_new, end_new = start, max(start, end - padding)
+        elif end >= duration - 0.001:      # trailing silence: keep the head of it
+            start_new, end_new = min(end, start + padding), end
+        else:
+            start_new, end_new = start, end
+
+        if end_new - start_new > 0.05:
+            trimmed.append((start_new, end_new))
+    return trimmed
+
+
 def _cut_with_ffmpeg(source: Path, keep: Sequence[Span], destination: Path) -> bool:
     parts = []
     for index, (start, end) in enumerate(keep):
@@ -229,6 +253,7 @@ def remove_dead_air(
 
         gaps = _invert(keep, duration)
         to_cut = _select_gaps_to_cut(gaps, duration, min_gap, min_clip_length)
+        to_cut = _keep_edges(to_cut, duration, _env_float("SILENCE_EDGE_PADDING", 0.8))
         if not to_cut:
             logging.info("Silence cutting: no gap long enough to remove.")
             return False

@@ -77,6 +77,11 @@ def get_schema() -> List[EnvSection]:
                 EnvField("SILENCE_PADDING", "Keep around speech (s)", "float", 0.15,
                          min_value=0.0, max_value=1.0, step=0.05,
                          help_text="Breathing room kept before and after each word so cuts do not clip syllables"),
+                EnvField("SILENCE_EDGE_PADDING", "Air at start and end (s)", "float", 0.8,
+                         min_value=0.0, max_value=5.0, step=0.1,
+                         help_text="Silence kept at the very beginning and end of a clip. Cutting it flush "
+                                   "makes the clip start and stop on the exact frame a word begins or ends, "
+                                   "which reads as an abrupt cut"),
                 EnvField("SILENCE_MIN_RESULT", "Min length after cutting (s)", "float", 8.0,
                          min_value=1.0, max_value=60.0, step=0.5,
                          help_text="Floor for the finished clip. Cutting stops here even if more dead air "
