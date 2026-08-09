@@ -104,6 +104,11 @@ def get_schema() -> List[EnvSection]:
                                    "random: draw a length per clip, so reruns end at different points"),
                 EnvField("MIN_SHORT_LENGTH", "Min short length (s)", "int_auto", 15, min_value=5, max_value=120,
                          help_text="Shortest allowed clip. Auto mode picks based on video length"),
+                EnvField("RENDER_TAIL_BUFFER", "Tail after the window (s)", "float", 1.5,
+                         min_value=0.0, max_value=10.0, step=0.5,
+                         help_text="Seconds of source material rendered after the chosen window, reserved from "
+                                   "within the maximum length. Without it the window boundary lands during or "
+                                   "right after speech and the clip stops on the exact frame - or mid-word"),
                 EnvField("MAX_SHORT_LENGTH", "Max short length (s)", "int_auto", 59, min_value=15, max_value=300,
                          help_text="Longest allowed clip. 59s keeps clips inside the YouTube Shorts limit"),
                 EnvField("MAX_COMBINED_SCENE_LENGTH", "Max combined scene (s)", "int_auto", 0, min_value=30, max_value=600,

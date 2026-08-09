@@ -2383,21 +2383,42 @@ def process_video(video_file: Path, config: ProcessingConfig, output_dir: Path) 
             # Ensure min <= max (scene might be shorter than min_short_length)
             effective_max = min(config.max_short_length, duration)
             effective_min = min(config.min_short_length, effective_max)
-            short_length = _pick_window_length(effective_min, effective_max)
+
+            # Reserve a tail inside the length budget. The action window is
+            # picked for the shorter span and the reserved seconds are rendered
+            # after it, so the clip has material to fade out on. Without it the
+            # window boundary lands during or right after speech and the clip
+            # stops on the exact frame a sentence ends - or mid-word.
+            tail = _get_env_float("RENDER_TAIL_BUFFER", 1.5)
+            tail = max(0.0, min(tail, max(0.0, effective_max - effective_min)))
+
+            window_length = _pick_window_length(effective_min, int(effective_max - tail))
 
             best_start = best_action_window_start(
                 scene,
-                float(short_length),
+                float(window_length),
                 audio_times,
                 audio_score,
                 video_times,
                 video_score,
             )
+
+            # The tail may cross the scene boundary - only the end of the source
+            # video is a hard limit. Scenes often end exactly where the speaker
+            # stops, which is precisely the abrupt ending this is meant to avoid,
+            # so clamping to the scene would leave the tail at zero.
+            short_length = min(
+                window_length + tail,
+                max(0.0, video_duration - best_start),
+            )
+            short_length = max(float(window_length), short_length)
+
             logging.info(
-                "Selected start %.2f for scene %d with window %ds",
+                "Selected start %.2f for scene %d with window %.1fs (+%.1fs tail)",
                 best_start,
                 i,
-                short_length,
+                float(window_length),
+                short_length - window_length,
             )
 
             # Always MP4, never the source container. Matroska does not store a
