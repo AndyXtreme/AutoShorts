@@ -416,7 +416,7 @@ Return ONLY valid JSON:
                 ]
                 try:
                     duration = float(subprocess.check_output(probe_cmd).decode().strip())
-                except:
+                except Exception:
                     duration = 30.0
                 
                 # Dynamic frame count: 1 per 2 seconds, clamped to 8-20 (same as regular captions)

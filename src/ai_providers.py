@@ -613,7 +613,7 @@ Be honest with scores - if a clip is genuinely just normal action, that's fine. 
                         "-of", "default=noprint_wrappers=1:nokey=1", str(path)
                     ], capture_output=True, text=True)
                     return float(res.stdout.strip())
-                except:
+                except Exception:
                     return 0
             
             total_duration = get_duration(video_path)
@@ -822,7 +822,7 @@ JSON FORMAT:
             if uploaded_file:
                 try:
                     client.files.delete(name=uploaded_file.name)
-                except:
+                except Exception:
                     pass
             # Don't delete cached proxy to speed up re-runs? 
             # Ideally we should clean it up, but for dev speed let's keep it if small?
@@ -830,7 +830,7 @@ JSON FORMAT:
             if temp_proxy.exists():
                 try:
                     temp_proxy.unlink()
-                except:
+                except Exception:
                     pass
 
 

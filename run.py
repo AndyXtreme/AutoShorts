@@ -57,7 +57,8 @@ signal.signal(signal.SIGTERM, _signal_handler)
 
 if __name__ == "__main__":
     try:
-        main()
+        # Any paths given on the command line replace the gameplay folder scan.
+        main(sys.argv[1:])
     except KeyboardInterrupt:
         logging.info("Keyboard interrupt received, cleaning up...")
         _cleanup_models()

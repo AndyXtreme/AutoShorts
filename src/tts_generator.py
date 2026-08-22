@@ -49,6 +49,45 @@ STYLE_VOICE_FALLBACKS = {
 
 
 @dataclass
+def _apply_speed(audio_path: Path) -> None:
+    """Speed the voiceover up or down according to TTS_SPEED.
+
+    Done with atempo rather than by resampling, so the voice keeps its pitch.
+    atempo only accepts 0.5-2.0 per instance, so wider factors are chained.
+    """
+    try:
+        speed = float(os.getenv("TTS_SPEED", "1.0"))
+    except (TypeError, ValueError):
+        return
+    if abs(speed - 1.0) < 0.01 or speed <= 0:
+        return
+
+    factors = []
+    remaining = speed
+    while remaining > 2.0:
+        factors.append(2.0)
+        remaining /= 2.0
+    while remaining < 0.5:
+        factors.append(0.5)
+        remaining /= 0.5
+    factors.append(remaining)
+
+    ffmpeg = os.getenv("FFMPEG_BINARY", "ffmpeg")
+    stretched = audio_path.with_name(f"{audio_path.stem}.speed{audio_path.suffix}")
+    result = subprocess.run(
+        [ffmpeg, "-y", "-v", "error", "-i", str(audio_path),
+         "-filter:a", ",".join(f"atempo={f:.4f}" for f in factors),
+         str(stretched)],
+        capture_output=True, text=True,
+    )
+    if result.returncode == 0 and stretched.exists() and stretched.stat().st_size > 0:
+        os.replace(stretched, audio_path)
+        logging.info(f"Voiceover speed set to {speed:.2f}x.")
+    else:
+        stretched.unlink(missing_ok=True)
+        logging.warning(f"Could not apply TTS_SPEED={speed}: {result.stderr.strip()[:200]}")
+
+
 class TTSConfig:
     """Configuration for TTS generation."""
     
@@ -387,7 +426,8 @@ class QwenTTS:
                 
                 # Save to file
                 wav.write(str(output_path), sr, audio)
-                
+                _apply_speed(output_path)
+
                 logging.info(f"TTS audio saved: {output_path.name}")
                 return True
             else:
@@ -522,10 +562,11 @@ class QwenTTS:
             final_audio = (final_audio * 32767).astype(np.int16)
             
             wav.write(str(output_path), sample_rate, final_audio)
-            
+            _apply_speed(output_path)
+
             total_duration = len(final_audio) / sample_rate
             logging.info(f"TTS audio generated: {total_duration:.1f}s for {len(captions)} captions")
-            
+
             return output_path
             
         except Exception as e:
