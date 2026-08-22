@@ -48,7 +48,6 @@ STYLE_VOICE_FALLBACKS = {
 }
 
 
-@dataclass
 def _apply_speed(audio_path: Path) -> None:
     """Speed the voiceover up or down according to TTS_SPEED.
 
@@ -88,6 +87,7 @@ def _apply_speed(audio_path: Path) -> None:
         logging.warning(f"Could not apply TTS_SPEED={speed}: {result.stderr.strip()[:200]}")
 
 
+@dataclass
 class TTSConfig:
     """Configuration for TTS generation."""
     
