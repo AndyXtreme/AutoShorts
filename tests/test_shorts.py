@@ -1,5 +1,5 @@
 import sys
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 import numpy as np
 from pathlib import Path
 
@@ -59,7 +59,7 @@ from shorts import (  # noqa: E402
     combine_scenes,
     select_background_resolution,
     ProcessingConfig,
-    compute_video_action_profile,
+    analysis_settings,
     _SecondsTime,
 )
 
@@ -69,32 +69,62 @@ def make_scene(start: float, end: float):
     return (_SecondsTime(start), _SecondsTime(end))
 
 
-def test_select_background_resolution():
-    assert select_background_resolution(800) == (720, 1280)
-    assert select_background_resolution(1500) == (1440, 2560)
-    assert select_background_resolution(2100) == (2160, 3840)
+def test_select_background_resolution(monkeypatch):
+    monkeypatch.delenv("MAX_OUTPUT_HEIGHT", raising=False)
+    # Assumed 9:16 when only a width is given.
+    assert select_background_resolution(700) == (720, 1280)
+    assert select_background_resolution(1000) == (1080, 1920)
 
 
-def test_blur_gpu_uses_cupy():
-    # Verify blur_gpu calls cupy/cupyx functions
-    # Input is a torch tensor mock
-    image_tensor = MagicMock()
-    image_tensor.is_contiguous.return_value = True
+def test_resolution_does_not_downscale_a_tall_crop(monkeypatch):
+    """A 9:16 crop out of 2560x1440 is 810x1440 - it must not land at 720p.
 
-    # Configure mock return for gaussian_filter
-    # It returns a cupy array mock
-    mock_cupy_array = MagicMock()
-    shorts.cupyx.scipy.ndimage.gaussian_filter.return_value = mock_cupy_array
+    Selecting by width used to put 810 below the 840px threshold and render
+    1440 rows of source into 1280.
+    """
+    monkeypatch.setenv("MAX_OUTPUT_HEIGHT", "1920")
+    assert select_background_resolution(810, 1440) == (1080, 1920)
 
-    # Return mock torch tensor
-    shorts.torch.utils.dlpack.from_dlpack.return_value = MagicMock()
 
-    blur_gpu(image_tensor)
+def test_resolution_respects_max_output_height(monkeypatch):
+    monkeypatch.setenv("MAX_OUTPUT_HEIGHT", "1280")
+    assert select_background_resolution(810, 1440) == (720, 1280)
+    monkeypatch.setenv("MAX_OUTPUT_HEIGHT", "3840")
+    assert select_background_resolution(1215, 2160) == (1440, 2560)
 
-    shorts.torch.to_dlpack.assert_called_with(image_tensor)
-    shorts.cp.from_dlpack.assert_called()
-    shorts.cupyx.scipy.ndimage.gaussian_filter.assert_called()
-    shorts.torch.utils.dlpack.from_dlpack.assert_called()
+
+def test_action_score_mode(monkeypatch):
+    """mean scores intensity per second, sum totals it over the scene."""
+    times = np.array([0.0, 1.0, 2.0, 3.0])
+    scores = np.array([1.0, 1.0, 1.0, 1.0])
+    long_scene = make_scene(0.0, 4.0)
+    short_scene = make_scene(0.0, 2.0)
+
+    monkeypatch.setenv("ACTION_SCORE_MODE", "sum")
+    assert shorts.scene_action_score(long_scene, times, scores, w_audio=1.0, w_video=0.0) >         shorts.scene_action_score(short_scene, times, scores, w_audio=1.0, w_video=0.0)
+
+    monkeypatch.setenv("ACTION_SCORE_MODE", "mean")
+    assert shorts.scene_action_score(long_scene, times, scores, w_audio=1.0, w_video=0.0) ==         shorts.scene_action_score(short_scene, times, scores, w_audio=1.0, w_video=0.0)
+
+
+def test_pick_window_length_is_deterministic_by_default(monkeypatch):
+    monkeypatch.delenv("CLIP_LENGTH_MODE", raising=False)
+    assert shorts._pick_window_length(15, 59) == 59
+    monkeypatch.setenv("CLIP_LENGTH_MODE", "max")
+    assert shorts._pick_window_length(15, 59) == 59
+
+
+def test_blur_gpu_delegates_to_the_torch_implementation():
+    """The blur is pure PyTorch now; it used to round-trip through CuPy.
+
+    The old assertions checked for torch.to_dlpack / cupy calls that the
+    current implementation never makes - they passed only because nothing ran
+    the suite.
+    """
+    image = MagicMock()
+    with patch.object(shorts, "gaussian_blur_torch", return_value="blurred") as blur:
+        assert blur_gpu(image, sigma=4.0) == "blurred"
+    blur.assert_called_once_with(image, 4.0)
 
 
 def test_combine_scenes_merges_short_scenes():
@@ -117,74 +147,57 @@ def test_combine_scenes_merges_short_scenes():
 # render_video_gpu logic is verified via mocks in separate flows or implicitly here if we add such tests.
 
 
-def test_compute_video_action_profile_sequential():
-    """Verify that compute_video_action_profile reads sequentially (batch-by-batch) and subsamples."""
-    
-    # 1. Setup Mock VideoReader
-    mock_vr = MagicMock()
-    # Let's say video has 1000 frames, 30 fps
-    mock_vr.__len__.return_value = 1000
-    mock_vr.get_avg_fps.return_value = 30.0
+def test_analysis_settings_come_from_the_environment(monkeypatch):
+    """Replaces a test for compute_video_action_profile, which no longer exists.
 
-    # Configure __getitem__ for metadata probe (vr_cpu[0].shape)
-    mock_frame = MagicMock()
-    mock_frame.shape = (720, 1280, 3)
-    mock_vr.__getitem__.return_value = mock_frame
+    That function was folded into analyze_video_content when scene detection
+    and motion profiling were merged into a single decode pass, and the test
+    kept importing it - so the whole suite failed to collect and had in fact
+    never run. Its subject (batch-wise reading) is now an implementation detail
+    of a function that needs a real decoder; what stayed worth asserting is
+    that the knobs reach it.
+    """
+    monkeypatch.delenv("SCENE_THRESHOLD", raising=False)
+    monkeypatch.delenv("ACTION_FPS", raising=False)
+    assert analysis_settings() == (27.0, 6)
 
-    # Configure torch.cat to return a mock with valid shape/numel
-    def side_effect_cat(tensors, **kwargs):
-        m = MagicMock()
-        m.shape = (100,)
-        m.numel.return_value = 100
-        m.mean.return_value = MagicMock(return_value=1.0)
-        m.std.return_value = MagicMock(return_value=1.0)
-        # Math operators return the same mock (so shape persists)
-        m.__sub__ = MagicMock(return_value=m)
-        m.__truediv__ = MagicMock(return_value=m)
-        m.view.return_value = m
-        return m
-    shorts.torch.cat.side_effect = side_effect_cat
+    monkeypatch.setenv("SCENE_THRESHOLD", "18.5")
+    monkeypatch.setenv("ACTION_FPS", "12")
+    assert analysis_settings() == (18.5, 12)
 
-    # Configure get_batch to return a mock tensor
-    def side_effect_get_batch(indices):
-        # Indices should be a range object
-        count = len(indices)
-        batch_mock = MagicMock()
-        batch_mock.shape = (count, 64, 64, 3) # (B, H, W, C)
-        # Slicing returns itself
-        batch_mock.__getitem__.return_value = batch_mock
-        # float() returns itself
-        batch_mock.float.return_value = batch_mock
-        return batch_mock
+    # Explicit arguments still win over the environment.
+    assert analysis_settings(30.0, 4) == (30.0, 4)
 
-    mock_vr.get_batch.side_effect = side_effect_get_batch
+    # A nonsensical sampling rate is clamped rather than dividing by zero.
+    monkeypatch.setenv("ACTION_FPS", "0")
+    assert analysis_settings()[1] == 1
 
-    # 2. Patch VideoReader in shorts
-    # Note: 'shorts.VideoReader' comes from 'decord', which we already mocked globally
-    # but we need the constructor to return our instance
-    shorts.VideoReader.return_value = mock_vr
 
-    # 3. Run function
-    # fps=6 means we keep 1 out of 5 frames (30/6 = 5)
-    # Total frames 100.
-    # It should iterate 0..16, 16..32, ... (batch_size=16)
-    times, scores = compute_video_action_profile(Path("dummy.mp4"), fps=6)
+def test_main_processes_only_the_files_it_is_given(tmp_path, monkeypatch):
+    """`run.py <file>` used to be silently ignored and scan the whole folder."""
+    wanted = tmp_path / "wanted.mkv"
+    wanted.write_bytes(b"")
+    (tmp_path / "other.mkv").write_bytes(b"")
 
-    # 4. Verifications
-    assert shorts.VideoReader.called
-    assert mock_vr.get_batch.called
+    processed = []
+    monkeypatch.setattr(shorts, "process_video",
+                        lambda video, config, out: processed.append(Path(video).name))
+    monkeypatch.setattr(shorts, "config_from_env", lambda: MagicMock())
+    monkeypatch.chdir(tmp_path)
 
-    # Check calls to get_batch
-    # We expect ranges of size 16 starting from 0
-    calls = mock_vr.get_batch.call_args_list
-    assert len(calls) > 0
-    
-    # First batch should comprise range(0, 16)
-    # The argument passed to get_batch is `batch_range`
-    first_call_args = calls[0].args[0]
-    assert list(first_call_args) == list(range(0, 16))
-    
-    # Check that we handled results
-    # times and scores should be numpy arrays (mocked)
-    # Since torch.cat is mocked, it returns a MagicMock, and .cpu().numpy() returns a MagicMock
-    assert isinstance(times, MagicMock) or isinstance(times, np.ndarray) or (times == [])
+    shorts.main([str(wanted)])
+    assert processed == ["wanted.mkv"]
+
+
+def test_main_skips_files_that_are_not_videos(tmp_path, monkeypatch):
+    note = tmp_path / "notes.txt"
+    note.write_text("not a video")
+
+    processed = []
+    monkeypatch.setattr(shorts, "process_video",
+                        lambda video, config, out: processed.append(video))
+    monkeypatch.setattr(shorts, "config_from_env", lambda: MagicMock())
+    monkeypatch.chdir(tmp_path)
+
+    shorts.main([str(note)])
+    assert processed == []
