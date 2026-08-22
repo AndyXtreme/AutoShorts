@@ -15,7 +15,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
 
@@ -40,15 +40,20 @@ class SubtitleConfig:
     @classmethod
     def from_env(cls) -> "SubtitleConfig":
         """Create config from environment variables."""
+        # _env_int rather than int(os.getenv(...)): the dashboard writes an
+        # empty string for any value it has no entry for, and int("") raises.
+        # SUBTITLE_FONT_SIZE is also allowed to be 0 ("use the template size")
+        # in the PyCaps path, which would be a 0px font here.
+        font_size = _env_int("SUBTITLE_FONT_SIZE", 48)
         return cls(
-            font_family=os.getenv("SUBTITLE_FONT", "Bangers"),
-            font_size=int(os.getenv("SUBTITLE_FONT_SIZE", "48")),
-            text_color=os.getenv("SUBTITLE_TEXT_COLOR", "#FFFFFF"),
-            highlight_color=os.getenv("SUBTITLE_HIGHLIGHT_COLOR", "#00ff88"),
-            shadow_color=os.getenv("SUBTITLE_SHADOW_COLOR", "#000000"),
-            shadow_offset=int(os.getenv("SUBTITLE_SHADOW_OFFSET", "2")),
-            position=os.getenv("SUBTITLE_POSITION", "bottom"),
-            margin_bottom=int(os.getenv("SUBTITLE_MARGIN_BOTTOM", "50")),
+            font_family=os.getenv("SUBTITLE_FONT") or "Bangers",
+            font_size=font_size if font_size > 0 else 48,
+            text_color=os.getenv("SUBTITLE_TEXT_COLOR") or "#FFFFFF",
+            highlight_color=os.getenv("SUBTITLE_HIGHLIGHT_COLOR") or "#00ff88",
+            shadow_color=os.getenv("SUBTITLE_SHADOW_COLOR") or "#000000",
+            shadow_offset=_env_int("SUBTITLE_SHADOW_OFFSET", 2),
+            position=os.getenv("SUBTITLE_POSITION") or "bottom",
+            margin_bottom=_env_int("SUBTITLE_MARGIN_BOTTOM", 50),
         )
 
 
@@ -105,9 +110,8 @@ def transcribe_audio(video_path: Path, output_srt: Optional[Path] = None) -> Pat
     
     try:
         import whisper
-        
-        # Load model
-        model = whisper.load_model(model_name)
+
+        model = _load_whisper_model(model_name)
 
         result = None
         if _use_vad():
@@ -152,6 +156,32 @@ def transcribe_audio(video_path: Path, output_srt: Optional[Path] = None) -> Pat
         raise
 
 
+_WHISPER_MODELS: Dict[str, Any] = {}
+_VAD_MODEL: List[Any] = []
+
+
+def _load_whisper_model(model_name: str):
+    """Load a Whisper model once per process.
+
+    A run transcribes every clip, and `medium` is ~1.5GB that otherwise gets
+    read from disk and pushed to the GPU again for each call. The model is
+    stateless between transcriptions, so one instance serves them all.
+    """
+    if model_name not in _WHISPER_MODELS:
+        import whisper
+        logging.info(f"Loading Whisper model '{model_name}' (first use in this process)...")
+        _WHISPER_MODELS[model_name] = whisper.load_model(model_name)
+    return _WHISPER_MODELS[model_name]
+
+
+def _load_vad_model():
+    """Load Silero VAD once per process. Same reasoning as the Whisper cache."""
+    if not _VAD_MODEL:
+        from silero_vad import load_silero_vad
+        _VAD_MODEL.append(load_silero_vad())
+    return _VAD_MODEL[0]
+
+
 def _use_vad() -> bool:
     return os.getenv("WHISPER_USE_VAD", "true").lower() in ("1", "true", "yes", "on")
 
@@ -167,13 +197,13 @@ def _speech_regions(audio_path: Path) -> Optional[List[tuple]]:
     so each can be transcribed on its own.
     """
     try:
-        from silero_vad import load_silero_vad, read_audio, get_speech_timestamps
+        from silero_vad import read_audio, get_speech_timestamps
     except ImportError:
         logging.warning("silero-vad not installed; transcribing the whole clip at once.")
         return None
 
     try:
-        model = load_silero_vad()
+        model = _load_vad_model()
         wav = read_audio(str(audio_path), sampling_rate=16000)
         stamps = get_speech_timestamps(wav, model, sampling_rate=16000, return_seconds=True)
     except Exception as e:
@@ -307,6 +337,33 @@ def _detect_language(model, full_wav: Path, regions, tmpdir, ffmpeg) -> Optional
     except Exception as e:
         logging.warning(f"Language detection failed ({e}); each region will decide for itself.")
         return None
+
+
+def detect_speech_spans(media_path: Path) -> Optional[List[Tuple[float, float]]]:
+    """Where speech happens in a media file, in seconds, without transcribing.
+
+    The silence cutter only needs to know *whether* someone is talking, not
+    what was said, and it used to answer that by running a full Whisper pass
+    over every clip - a second transcription on top of the one the subtitles
+    already need. Silero decides the same question in a fraction of the time.
+
+    Returns None when the VAD is unavailable, so callers can fall back.
+    """
+    ffmpeg = os.getenv("FFMPEG_BINARY", "ffmpeg")
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        wav = Path(tmpdir) / "vad.wav"
+        extract = subprocess.run(
+            [ffmpeg, "-y", "-v", "error", "-i", str(media_path),
+             "-vn", "-ac", "1", "-ar", "16000", str(wav)],
+            capture_output=True, text=True,
+        )
+        if extract.returncode != 0 or not wav.exists():
+            logging.warning("Could not extract audio for speech detection.")
+            return None
+        return _speech_regions(wav)
 
 
 def _transcribe_speech_regions(model, video_path: Path) -> Optional[dict]:
@@ -955,6 +1012,23 @@ def _run_pycaps_worker(video_path_str: str, srt_path_str: str, output_path_str: 
             builder
             .with_output_video(output_path_str)
         )
+
+        # The caption renderer re-encodes every frame, so whatever it does is
+        # the quality the viewer actually gets - the careful CQ 23 render
+        # upstream is decoded and thrown away here. Its default is CRF 21 at
+        # preset veryfast; "high" (CRF 19, preset fast) costs a little render
+        # time and removes the visible mush in fast gameplay motion.
+        quality_name = os.getenv("SUBTITLE_VIDEO_QUALITY", "high").strip().lower()
+        try:
+            from pycaps import VideoQuality
+
+            builder = builder.with_video_quality(VideoQuality(quality_name))
+            print(f"Caption render quality: {quality_name}.")
+        except ValueError:
+            valid = ", ".join(q.value for q in VideoQuality)
+            print(f"Unknown SUBTITLE_VIDEO_QUALITY={quality_name!r}; valid: {valid}. Using the template default.")
+        except ImportError:
+            print("This pycaps build has no VideoQuality; using the template default.")
         
         # Configure Semantic Tagger for AI tags (word highlighting handled by PyCaps templates)
         if word_lists:
@@ -1246,7 +1320,7 @@ def generate_subtitles(
                 ]
                 try:
                     duration = float(subprocess.check_output(ffprobe_cmd).decode().strip())
-                except:
+                except Exception:
                     duration = 30.0
                 
                 # Split narration into sentences

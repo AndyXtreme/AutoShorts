@@ -56,6 +56,49 @@ def _merge_spans(spans: Sequence[Span], join_below: float = 0.0) -> List[Span]:
     return [(s, e) for s, e in merged]
 
 
+def _probe_duration(path: Path) -> Optional[float]:
+    """Actual duration of the rendered clip, in seconds."""
+    ffprobe = os.getenv("FFPROBE_BINARY", "ffprobe")
+    result = subprocess.run(
+        [ffprobe, "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=nw=1:nk=1", str(path)],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        value = float(result.stdout.strip())
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _speech_spans_from_vad(clip_path: Path, padding: float) -> Optional[List[Span]]:
+    """Spans covering speech, found by the voice activity detector.
+
+    Preferred over transcribing: the cutter only needs to know where someone
+    talks, and Silero answers that in milliseconds where Whisper takes seconds
+    per clip. Returns None if the detector is unavailable, so the caller can
+    fall back to the transcript.
+    """
+    try:
+        from subtitle_generator import detect_speech_spans
+    except ImportError:
+        return None
+
+    try:
+        regions = detect_speech_spans(clip_path)
+    except Exception as e:
+        logging.warning(f"Speech detection failed ({e}); falling back to transcription.")
+        return None
+
+    if regions is None:
+        return None
+
+    spans = [(max(0.0, start - padding), end + padding) for start, end in regions]
+    return _merge_spans(spans, join_below=padding)
+
+
 def _speech_spans(words_path: Path, padding: float) -> List[Span]:
     """Spans covering spoken words, padded so words are not clipped at the edges."""
     try:
@@ -191,14 +234,23 @@ def _cut_with_ffmpeg(source: Path, keep: Sequence[Span], destination: Path) -> b
     streams = "".join(f"[v{i}][a{i}]" for i in range(len(keep)))
     filter_complex = ";".join(parts) + f";{streams}concat=n={len(keep)}:v=1:a=1[v][a]"
 
+    # Quality-targeted rather than a fixed bitrate. The clip arrives from the
+    # renderer at CQ 23 and leaves for the caption renderer, so this is the
+    # middle link of three encodes - a flat "-b:v 8M" both wasted bits on calm
+    # footage and starved busy footage, for no gain either way.
     ffmpeg = os.getenv("FFMPEG_BINARY", "ffmpeg")
-    for encoder in ("hevc_nvenc", "libx264"):
+    encoders = (
+        ("hevc_nvenc", ["-preset", "p5", "-rc", "vbr", "-cq", "23", "-maxrate", "80M", "-bufsize", "100M"]),
+        ("libx264", ["-preset", "medium", "-crf", "20"]),
+    )
+    for encoder, quality_args in encoders:
         command = [
             ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
             "-i", str(source),
             "-filter_complex", filter_complex,
             "-map", "[v]", "-map", "[a]",
-            "-c:v", encoder, "-b:v", "8M",
+            "-c:v", encoder, *quality_args,
+            "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "192k",
             str(destination),
         ]
@@ -229,17 +281,28 @@ def remove_dead_air(
     padding = _env_float("SILENCE_PADDING", 0.15)
     motion_threshold = _env_float("SILENCE_MOTION_KEEP", 0.5)
 
-    from subtitle_generator import transcribe_audio, word_timings_path
+    # The renderer can land a frame or two short of the requested duration, and
+    # a keep-span past the end of the file makes ffmpeg concatenate an empty
+    # segment. Trust the file over the request.
+    actual = _probe_duration(clip_path)
+    if actual is not None:
+        duration = min(duration, actual)
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        probe_srt = Path(tmpdir) / "probe.srt"
-        try:
-            transcribe_audio(clip_path, probe_srt)
-        except Exception as e:
-            logging.warning(f"Silence cutting skipped, transcription failed: {e}")
-            return False
+        speech = _speech_spans_from_vad(clip_path, padding)
 
-        speech = _speech_spans(word_timings_path(probe_srt), padding)
+        if speech is None:
+            # No voice activity detector available - fall back to transcribing.
+            from subtitle_generator import transcribe_audio, word_timings_path
+
+            probe_srt = Path(tmpdir) / "probe.srt"
+            try:
+                transcribe_audio(clip_path, probe_srt)
+            except Exception as e:
+                logging.warning(f"Silence cutting skipped, transcription failed: {e}")
+                return False
+            speech = _speech_spans(word_timings_path(probe_srt), padding)
+
         motion = _motion_spans(
             video_times, video_scores, source_offset, duration, motion_threshold, padding
         )
