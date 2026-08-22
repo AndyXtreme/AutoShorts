@@ -16,6 +16,7 @@ import logging
 import math
 import random
 import os
+import sys
 
 # Force NVRTC to use C++17 to avoid "libcu++ requires at least C++ 17" error
 # CuPy uses NVRTC for JIT compilation, which needs these flags
@@ -333,10 +334,28 @@ class VideoAnalysisResult:
     video_scores: np.ndarray
 
 
+def analysis_settings(
+    scene_threshold: Optional[float] = None,
+    action_fps: Optional[int] = None,
+) -> Tuple[float, int]:
+    """How eager scene detection is, and how finely motion is sampled.
+
+    Both were function defaults no caller ever overrode, yet the threshold
+    decides how many scenes exist at all - and therefore how much SCENE_LIMIT
+    has to choose from. Continuous footage without hard cuts needs a lower
+    value to produce candidates in the first place.
+    """
+    if scene_threshold is None:
+        scene_threshold = _get_env_float("SCENE_THRESHOLD", 27.0)
+    if action_fps is None:
+        action_fps = _get_env_int("ACTION_FPS", 6)
+    return float(scene_threshold), max(1, int(action_fps))
+
+
 def analyze_video_content(
-    video_path: Path, 
-    scene_threshold: float = 27.0,
-    action_fps: int = 6
+    video_path: Path,
+    scene_threshold: Optional[float] = None,
+    action_fps: Optional[int] = None,
 ) -> VideoAnalysisResult:
     """Unified pass for Scene Detection and Action Profiling.
     
@@ -353,7 +372,9 @@ def analyze_video_content(
         VideoAnalysisResult containing scenes and action scores.
     """
     import cv2
-    
+
+    scene_threshold, action_fps = analysis_settings(scene_threshold, action_fps)
+
     # 1) Probe video for resolution and FPS (CPU lightweight probe)
     try:
         vr_probe = VideoReader(str(video_path), ctx=cpu(0))
@@ -994,20 +1015,31 @@ def scene_action_score(
     if end_sec <= start_sec:
         return 0.0
 
-    def _segment_sum(times: np.ndarray, score: np.ndarray) -> float:
+    # "sum" totals the action in the scene, so a long mediocre scene can
+    # outrank a short intense one purely by having more samples. "mean" scores
+    # intensity per second instead and surfaces short highlights - at the cost
+    # of favouring very short scenes, where a single spike carries the average.
+    # sum stays the default: it is what existing setups were tuned against.
+    mode = os.getenv("ACTION_SCORE_MODE", "sum").strip().lower()
+    if mode not in ("sum", "mean"):
+        logging.warning(f"Unknown ACTION_SCORE_MODE={mode!r}; using 'sum'.")
+        mode = "sum"
+
+    def _segment_stat(times: np.ndarray, score: np.ndarray) -> float:
         if times.size == 0 or score.size == 0:
             return 0.0
         mask = (times >= start_sec) & (times < end_sec)
         if not np.any(mask):
             return 0.0
-        return float(score[mask].sum())
+        segment = score[mask]
+        return float(segment.mean() if mode == "mean" else segment.sum())
 
-    audio_val = _segment_sum(audio_times, audio_score)
+    audio_val = _segment_stat(audio_times, audio_score)
 
     if video_times is None or video_score is None:
         return audio_val
 
-    video_val = _segment_sum(video_times, video_score)
+    video_val = _segment_stat(video_times, video_score)
 
     return w_audio * audio_val + w_video * video_val
 
@@ -1124,19 +1156,46 @@ def best_action_window_start(
     return best_start_time
 
 
-def select_background_resolution(width: int) -> Tuple[int, int]:
-    """Choose an output resolution based on the clip width."""
-    if width < 840:
-        return 720, 1280
-    if width < 1020:
-        return 900, 1600
-    if width < 1320:
-        return 1080, 1920
-    if width < 1680:
-        return 1440, 2560
-    if width < 2040:
-        return 1800, 3200
-    return 2160, 3840
+# Standard vertical sizes, tallest last. Deliberately only sizes people
+# actually publish - a 900x1600 output lands in YouTube's 720p bucket anyway
+# (it buckets vertical video by the *short* edge), so it costs bitrate without
+# buying a quality tier.
+_VERTICAL_LADDER: Tuple[Tuple[int, int], ...] = (
+    (720, 1280),
+    (1080, 1920),
+    (1440, 2560),
+    (2160, 3840),
+)
+
+
+def select_background_resolution(width: int, height: Optional[int] = None) -> Tuple[int, int]:
+    """Choose an output resolution for the cropped clip.
+
+    The crop already has the target aspect ratio, so its *height* says how much
+    real detail the source can supply. Picking by width used to round the wrong
+    way: a 9:16 crop out of 2560x1440 is 810x1440, and 810 fell below the old
+    840px threshold - so 1440 rows of source were rendered into 1280, throwing
+    away detail that was there. Take the smallest standard size that is at
+    least as tall as the crop instead, then cap it at MAX_OUTPUT_HEIGHT.
+
+    `height` is optional so older callers (and the existing tests) keep working;
+    without it the crop is assumed to be 9:16.
+    """
+    if height is None or height <= 0:
+        height = int(round(width * 16 / 9))
+
+    max_height = _get_env_int("MAX_OUTPUT_HEIGHT", 1920)
+    if max_height <= 0:
+        max_height = _VERTICAL_LADDER[-1][1]
+
+    allowed = [size for size in _VERTICAL_LADDER if size[1] <= max_height]
+    if not allowed:
+        allowed = [_VERTICAL_LADDER[0]]
+
+    for bg_w, bg_h in allowed:
+        if bg_h >= height:
+            return bg_w, bg_h
+    return allowed[-1]
 
 
 def get_render_params(
@@ -1180,7 +1239,7 @@ def get_render_params(
     crop_y = max(0, min(h - crop_h, crop_y))
 
     # Calculate background/output resolution
-    bg_w, bg_h = select_background_resolution(crop_w)
+    bg_w, bg_h = select_background_resolution(crop_w, crop_h)
 
     # Logic from get_final_clip to determine layout
     is_vertical_bg = False
@@ -2491,8 +2550,11 @@ def process_video(video_file: Path, config: ProcessingConfig, output_dir: Path) 
                 }
                 rendered_clips.append((render_path, category, render_meta))
     else:
-        # No scenes found, fallback to random clip
-        short_length = random.randint(
+        # No scenes found: fall back to a single clip from the middle of the
+        # video. Length follows CLIP_LENGTH_MODE like every other clip, so this
+        # path is reproducible too - it used to draw a random length even when
+        # the mode asked for deterministic output.
+        short_length = _pick_window_length(
             config.min_short_length, config.max_short_length
         )
 
@@ -2504,7 +2566,13 @@ def process_video(video_file: Path, config: ProcessingConfig, output_dir: Path) 
         min_start_point = min(10, math.floor(video_duration) - adapted_short_length)
         max_start_point = math.floor(video_duration - adapted_short_length)
 
-        start_point = float(random.randint(int(min_start_point), int(max_start_point)))
+        if os.getenv("CLIP_LENGTH_MODE", "max").strip().lower() == "random":
+            start_point = float(random.randint(int(min_start_point), int(max_start_point)))
+        else:
+            # Centre the clip rather than picking a random offset: without
+            # scenes there is nothing to rank, and the middle of a recording is
+            # a better guess than either end.
+            start_point = float(max(min_start_point, (min_start_point + max_start_point) // 2))
 
         params = get_render_params(
             video_file,
@@ -2704,21 +2772,47 @@ def update_config_with_auto_lengths(config: ProcessingConfig, video_duration: fl
     )
 
 
-def main() -> None:
-    """Entry point for command-line execution."""
-    # args = parse_args()
+VIDEO_SUFFIXES = (".mp4", ".mkv", ".mov")
+
+
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    """Entry point for command-line execution.
+
+    With no arguments every video in `gameplay/` is processed. Named files are
+    processed instead - passing one used to be silently ignored, so a run aimed
+    at a single clip quietly worked through the whole folder.
+    """
     config = config_from_env()
     output_dir = Path("generated")
     output_dir.mkdir(exist_ok=True)
 
-    gameplay_dir = Path("gameplay")
-    if not gameplay_dir.exists():
-         logging.warning("No 'gameplay' directory found. Exiting.")
-         return
+    requested = [Path(arg) for arg in (argv if argv is not None else sys.argv[1:])]
 
-    for video_file in gameplay_dir.iterdir():
-        if video_file.is_file() and video_file.suffix.lower() in [".mp4", ".mkv", ".mov"]:
-            process_video(video_file, config, output_dir)
+    if requested:
+        video_files = []
+        for path in requested:
+            if not path.exists():
+                logging.error(f"No such file: {path}")
+                continue
+            if path.suffix.lower() not in VIDEO_SUFFIXES:
+                logging.error(f"Not a supported video file: {path}")
+                continue
+            video_files.append(path)
+        if not video_files:
+            logging.warning("None of the given files could be processed. Exiting.")
+            return
+    else:
+        gameplay_dir = Path("gameplay")
+        if not gameplay_dir.exists():
+            logging.warning("No 'gameplay' directory found. Exiting.")
+            return
+        video_files = sorted(
+            f for f in gameplay_dir.iterdir()
+            if f.is_file() and f.suffix.lower() in VIDEO_SUFFIXES
+        )
+
+    for video_file in video_files:
+        process_video(video_file, config, output_dir)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -48,8 +49,12 @@ def get_schema() -> List[EnvSection]:
                          help_text="Width part of the output aspect ratio. 9 with height 16 = vertical Shorts format"),
                 EnvField("TARGET_RATIO_H", "Aspect ratio height", "int", 16, min_value=1, max_value=32,
                          help_text="Height part of the output aspect ratio. 16 with width 9 = vertical Shorts format"),
-                EnvField("MAX_OUTPUT_HEIGHT", "Max output height (px)", "int", 1920, min_value=480, max_value=3840,
-                         help_text="Caps the rendered resolution. 1920 gives 1080x1920 at 9:16"),
+                EnvField("MAX_OUTPUT_HEIGHT", "Max output height (px)", "select", "1920",
+                         options=["1280", "1920", "2560", "3840"],
+                         help_text="Upper limit for the rendered resolution: 1280 = 720x1280, 1920 = 1080x1920, "
+                                   "2560 = 1440x2560, 3840 = 2160x3840. The clip uses the smallest of these that "
+                                   "is still at least as tall as the cropped source, so nothing gets downscaled "
+                                   "needlessly. 1920 is the right choice for YouTube Shorts"),
             ],
         ),
         EnvSection(
@@ -61,6 +66,18 @@ def get_schema() -> List[EnvSection]:
                 EnvField("ACTION_W_VIDEO", "Motion weight", "float", 0.4, min_value=0.0, max_value=1.0, step=0.05,
                          help_text="How much frame-to-frame motion drives clip selection. Raise above the audio "
                                    "weight to favour visually busy moments over loud ones. Only the ratio matters"),
+                EnvField("ACTION_SCORE_MODE", "Score scenes by", "select", "sum", options=["sum", "mean"],
+                         help_text="sum: total action in the scene, so a long average scene can outrank a short "
+                                   "intense one. mean: action per second, which surfaces short highlights but "
+                                   "favours very short scenes where one spike carries the average"),
+                EnvField("SCENE_THRESHOLD", "Scene cut sensitivity", "float", 27.0,
+                         min_value=5.0, max_value=60.0, step=1.0,
+                         help_text="How different two frames must look to count as a cut. Lower finds more, "
+                                   "shorter scenes - useful for continuous footage without hard cuts, where the "
+                                   "default leaves too few candidates for the scene limit to choose from"),
+                EnvField("ACTION_FPS", "Motion sampling rate", "int", 6, min_value=1, max_value=30,
+                         help_text="Frames per second examined when measuring motion. Higher catches brief "
+                                   "spikes but slows the analysis pass down roughly proportionally"),
             ],
         ),
         EnvSection(
@@ -238,6 +255,11 @@ def get_schema() -> List[EnvSection]:
                              "neo-minimal", "line-focus", "word-focus", "retro-gaming", "default"],
                     help_text="Look of the captions: font, colours and the animation of the spoken word",
                 ),
+                EnvField("SUBTITLE_VIDEO_QUALITY", "Caption render quality", "select", "high",
+                         options=["low", "middle", "high", "very_high"],
+                         help_text="The caption renderer re-encodes every frame, so this decides the quality of "
+                                   "the finished clip - the render settings before it are discarded here. "
+                                   "high is a good balance; very_high is noticeably slower for little visible gain"),
                 EnvField("SUBTITLE_FONT_SIZE", "Caption font size", "int", 0, min_value=0, max_value=120,
                          help_text="0 keeps the template's own size (24 for 'hype'). Captions are rendered at "
                                    "twice this value in pixels, so the limit is the longest single word - it "
@@ -318,10 +340,6 @@ def get_schema() -> List[EnvSection]:
         EnvSection(
             title="Decord & Debug",
             fields=[
-                EnvField("DECORD_EOF_RETRY_MAX", "Decord EOF retry max", "int", 65536, min_value=1, max_value=200000,
-                         help_text="Max retries for video decoding errors (increase if videos fail to load)"),
-                EnvField("DECORD_SKIP_TAIL_FRAMES", "Decord skip tail frames", "int", 0, min_value=0, max_value=1000,
-                         help_text="Skip frames at end of video (helps with corrupted endings)"),
                 EnvField("DEBUG_SKIP_ANALYSIS", "Debug: skip analysis", "bool", False,
                          help_text="Skip video analysis and use cached data (for testing)"),
                 EnvField("DEBUG_SKIP_RENDER", "Debug: skip render", "bool", False,
@@ -391,18 +409,47 @@ def normalize_value(field: EnvField, value: Any) -> str:
     return str(value)
 
 
+_NEEDS_QUOTING = ('#', '"', "'", "\\", "\n", "\r")
+
+
+def _quote(value: str) -> str:
+    """Quote a value that dotenv would otherwise read back differently.
+
+    An unquoted `#` starts an inline comment and surrounding whitespace is
+    stripped, so a free-text field such as TTS_VOICE_DESCRIPTION could come
+    back truncated on the next load.
+    """
+    if value == "":
+        return value
+    if not any(ch in value for ch in _NEEDS_QUOTING) and value == value.strip():
+        return value
+    escaped = (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\r", "")
+        .replace("\n", "\n")
+    )
+    return '"' + escaped + '"'
+
+
 def save_env_values(values: Dict[str, Any], extras: Optional[Dict[str, str]] = None) -> None:
     extras = extras or {}
-    field_map = _field_map()
     lines: List[str] = []
     for field in iter_fields():
         raw_value = values.get(field.name, field.default)
-        lines.append(f"{field.name}={normalize_value(field, raw_value)}")
+        lines.append(f"{field.name}={_quote(normalize_value(field, raw_value))}")
     if extras:
         lines.append("")
         lines.append("# Extra settings")
         for key, value in sorted(extras.items()):
             if value is None:
                 continue
-            lines.append(f"{key}={value}")
-    ENV_PATH.write_text("\n".join(lines) + "\n")
+            lines.append(f"{key}={_quote(str(value))}")
+
+    # Written beside the target and moved into place: the pipeline reads .env
+    # while the dashboard may be saving it, and a half-written file makes that
+    # run fall back to defaults without any error to show for it.
+    payload = "\n".join(lines) + "\n"
+    temp_path = ENV_PATH.with_name(ENV_PATH.name + ".saving")
+    temp_path.write_text(payload, encoding="utf-8")
+    os.replace(temp_path, ENV_PATH)

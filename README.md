@@ -216,6 +216,12 @@ docker compose up -d       # recreates the container on a changed image
 docker compose run --rm -e MODE=batch autoshorts
 ```
 
+Every video in `gameplay/` is processed. To do just one, name it:
+
+```bash
+docker compose run --rm -e MODE=batch autoshorts python run.py "gameplay/my-recording.mkv"
+```
+
 Or without Compose:
 
 ```bash
@@ -291,6 +297,9 @@ Which moments become clips. Applied *before* anything is rendered.
 | `SCENE_LIMIT` | Core Settings → Scene limit | `4` | Clips per source video. Raise it for more coverage, then discard what you do not need |
 | `ACTION_W_AUDIO` | Action Detection → Audio weight | `0.6` | How strongly loudness peaks (gunfire, shouting, impacts) drive selection |
 | `ACTION_W_VIDEO` | Action Detection → Motion weight | `0.4` | How strongly frame-to-frame motion drives it. Only the ratio matters — raise it above the audio weight to favour visually busy moments over loud ones |
+| `ACTION_SCORE_MODE` | Action Detection → Score scenes by | `sum` | `sum` totals the action in a scene, so a long average scene can outrank a short intense one. `mean` scores action per second and surfaces brief highlights |
+| `SCENE_THRESHOLD` | Action Detection → Scene cut sensitivity | `27.0` | How different two frames must look to count as a cut. Lower finds more, shorter scenes — needed for continuous footage without hard cuts, where the default leaves too few candidates |
+| `ACTION_FPS` | Action Detection → Motion sampling rate | `6` | Frames per second examined when measuring motion. Higher catches brief spikes and slows the analysis pass roughly proportionally |
 
 > For gameplay with constant engine or ambient noise, loudness carries little
 > information: the audio is loud throughout, whether or not anything
@@ -334,6 +343,20 @@ happens, then stitches the rest back together. Runs *after* rendering and
 | `SUBTITLE_VERTICAL_ALIGN` | Caption Layout → Vertical position | `bottom` | `bottom`, `center` or `top` |
 | `SUBTITLE_VERTICAL_OFFSET` | Caption Layout → Vertical offset | `-0.1` | Nudge away from the chosen edge |
 | `PYCAPS_KEEP_SPLITTERS` | Caption Layout → Split long captions | `true` | Off shows a whole transcript block at once: exact SRT boundaries, but walls of text |
+| `SUBTITLE_VIDEO_QUALITY` | Caption Layout → Caption render quality | `high` | The caption renderer re-encodes every frame, so this — not the render settings before it — decides the quality of the finished clip. `high` is CRF 19; `very_high` is noticeably slower for little visible gain |
+
+### Output Resolution
+
+| Variable | UI (Settings →) | Default | Effect |
+| :--- | :--- | :--- | :--- |
+| `MAX_OUTPUT_HEIGHT` | Core Settings → Max output height | `1920` | Upper limit for the rendered resolution: `1280` → 720×1280, `1920` → 1080×1920, `2560` → 1440×2560, `3840` → 2160×3840 |
+
+The clip uses the **smallest** of those sizes that is still at least as tall as
+the cropped source, so nothing is downscaled without reason. A 9:16 crop out of
+a 2560×1440 recording is 810×1440 — with the default cap that renders at
+1080×1920. YouTube buckets vertical video by its short edge, so 1080 wide is
+what puts a Short in the 1080p tier.
+
 
 ### How the settings interact
 
@@ -462,7 +485,7 @@ DEBUG_RENDERED_CLIPS="generated/test_clip.mp4:action"
 | **"CUDA not available"** | Ensure `--gpus all` (Docker) or CUDA toolkit is installed |
 | **NVENC Error** | Falls back to `libx264` automatically; check GPU driver |
 | **PyCaps fails** | Falls back to FFmpeg burn-in subtitles automatically |
-| **Decord EOF hang** | Increase `DECORD_EOF_RETRY_MAX` or set `DECORD_SKIP_TAIL_FRAMES=300` |
+| **Clip is only 720p** | Raise `MAX_OUTPUT_HEIGHT` (Core Settings → Max output height). `1920` gives 1080×1920 |
 | **API rate limits** | Switch to `gpt-5-mini` (10M free tokens/day) or use `local` provider |
 
 ---
