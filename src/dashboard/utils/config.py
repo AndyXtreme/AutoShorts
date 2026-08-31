@@ -452,4 +452,13 @@ def save_env_values(values: Dict[str, Any], extras: Optional[Dict[str, str]] = N
     payload = "\n".join(lines) + "\n"
     temp_path = ENV_PATH.with_name(ENV_PATH.name + ".saving")
     temp_path.write_text(payload, encoding="utf-8")
-    os.replace(temp_path, ENV_PATH)
+    try:
+        os.replace(temp_path, ENV_PATH)
+    except OSError:
+        # Docker bind-mounts .env as a single file, so the path itself is a
+        # mount point and cannot be renamed over. Overwrite it in place and
+        # accept the small window rather than losing the save entirely.
+        try:
+            ENV_PATH.write_text(payload, encoding="utf-8")
+        finally:
+            temp_path.unlink(missing_ok=True)

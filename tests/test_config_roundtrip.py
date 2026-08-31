@@ -60,6 +60,17 @@ def test_save_leaves_no_temporary_file_behind(env_file):
     assert not list(env_file.parent.glob("*.saving"))
 
 
+def test_save_survives_a_bind_mounted_env_file(env_file, monkeypatch):
+    """Docker mounts .env as a single file, so it cannot be renamed over."""
+    def busy(src, dst):
+        raise OSError(16, "Device or resource busy")
+
+    monkeypatch.setattr(cfg.os, "replace", busy)
+    cfg.save_env_values({"SCENE_LIMIT": 6})
+    assert dotenv_values(str(env_file))["SCENE_LIMIT"] == "6"
+    assert not list(env_file.parent.glob("*.saving"))
+
+
 def test_unknown_settings_are_preserved(env_file):
     cfg.save_env_values({"SCENE_LIMIT": 4}, extras={"MY_OWN_FLAG": "1"})
     assert dotenv_values(str(env_file))["MY_OWN_FLAG"] == "1"
