@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -145,6 +144,41 @@ def _build_env(overrides: dict) -> dict:
     return env
 
 
+UPLOAD_CHUNK = 8 * 1024 * 1024
+
+
+def _save_upload(upload, destination: Path) -> None:
+    """Copy a browser upload into gameplay/, showing how far along it is.
+
+    Streamlit dims the entire page while a rerun is in flight, so writing a
+    multi-gigabyte recording in one shutil call looks exactly like a hung UI.
+    Copying in chunks lets a progress bar report the one thing worth knowing.
+    """
+    total = int(getattr(upload, "size", 0) or 0)
+    caption = st.empty()
+    bar = st.progress(0.0)
+    written = 0
+    upload.seek(0)
+    try:
+        with open(destination, "wb") as target:
+            while True:
+                chunk = upload.read(UPLOAD_CHUNK)
+                if not chunk:
+                    break
+                target.write(chunk)
+                written += len(chunk)
+                if total:
+                    bar.progress(min(written / total, 1.0))
+                    caption.caption(
+                        f"Saving {upload.name} - {written / 1e9:.2f} / {total / 1e9:.2f} GB"
+                    )
+                else:
+                    caption.caption(f"Saving {upload.name} - {written / 1e9:.2f} GB")
+    finally:
+        bar.empty()
+        caption.empty()
+
+
 def render() -> None:
     st.set_page_config(page_title="Generate - AutoShorts", page_icon="🎬", layout="wide")
     
@@ -254,35 +288,35 @@ def render() -> None:
             # shelled out to zenity/tkinter, which do not exist in the container
             # the UI is served from. Dropping files into gameplay/ on the host
             # works just as well and shows up here on the next rerun.
+            upload_round = st.session_state.get("_upload_round", 0)
             uploaded = st.file_uploader(
                 "📂 Add video",
                 type=["mp4", "mkv", "mov", "avi", "webm", "m4v"],
                 accept_multiple_files=True,
-                key="gameplay_upload",
+                key=f"gameplay_upload_{upload_round}",
                 help="Copies into gameplay/. Browser uploads are buffered in memory, so for "
                      "very large recordings it is faster and safer to copy the file straight "
                      "into the gameplay/ folder - it is picked up automatically.",
             )
             if uploaded:
-                handled = st.session_state.setdefault("_uploaded_names", set())
                 added = 0
                 gameplay_dir.mkdir(exist_ok=True)
                 for upload in uploaded:
-                    if upload.name in handled:
-                        continue
-                    handled.add(upload.name)
                     destination = gameplay_dir / upload.name
                     if destination.exists():
                         st.warning(f"⚠️ '{upload.name}' is already in the queue")
                         continue
                     try:
-                        with open(destination, "wb") as target:
-                            shutil.copyfileobj(upload, target)
+                        _save_upload(upload, destination)
                         added += 1
                     except Exception as e:
+                        destination.unlink(missing_ok=True)
                         st.error(f"❌ Could not save '{upload.name}': {e}")
                 if added:
                     st.success(f"✅ Added {added} video(s) to the queue")
+                    # A new widget key drops Streamlit's in-memory copy of the
+                    # upload, which is the whole file and stays for the session.
+                    st.session_state["_upload_round"] = upload_round + 1
                     st.rerun()
 
         with col_clear:
