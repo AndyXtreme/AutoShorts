@@ -394,3 +394,27 @@ def test_a_window_longer_than_its_scene_starts_at_the_scene(monkeypatch):
 
     start = shorts.best_action_window_start(region, window, times, scores, times, scores)
     assert start == pytest.approx(99.75, abs=0.5)
+
+
+def test_clips_from_adjacent_scenes_do_not_overlap():
+    """Windows may run past their scene, so neighbours can collide.
+
+    Reproduces the measured case: with mean scoring the ranking put three
+    scenes from the same stretch of video in one selection, and the first two
+    clips shared 20.3 seconds of footage.
+    """
+    scenes = [(99.75, 115.22), (115.22, 144.13), (144.13, 160.22)]
+    window = 35.0
+    previous_end = 0.0
+    spans = []
+    for scene_start, scene_end in scenes:
+        region_start = max(scene_start, previous_end)
+        region_end = scene_end + max(0.0, window - (scene_end - scene_start))
+        if region_start >= region_end:
+            continue
+        start = region_start
+        spans.append((start, start + window))
+        previous_end = start + window
+
+    for (_, earlier_end), (later_start, _) in zip(spans, spans[1:]):
+        assert later_start >= earlier_end

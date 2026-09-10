@@ -2503,6 +2503,13 @@ def process_video(video_file: Path, config: ProcessingConfig, output_dir: Path) 
     rendered_clips: List[Tuple[Path, str, Optional[dict]]] = []
 
     if final_scene_list:
+        # Where the previous clip's source window ended. Windows are allowed to
+        # run past their scene, so two scenes picked next to each other would
+        # otherwise hand back overlapping clips - measured at 20.3s of shared
+        # footage between two Shorts once the ranking put adjacent scenes in
+        # the same selection.
+        previous_end = 0.0
+
         for i, scene in enumerate(final_scene_list, start=1):
             scene_start = float(scene[0].get_seconds())
             scene_end = float(scene[1].get_seconds())
@@ -2551,10 +2558,22 @@ def process_video(video_file: Path, config: ProcessingConfig, output_dir: Path) 
             # search region grows by exactly the overrun, which leaves the
             # start pinned to the scene and the surplus hanging off the end.
             overrun = max(0.0, float(window_length) - (scene_end - scene_start))
+            region_start = max(scene_start, previous_end)
+            region_end = min(video_duration, scene_end + overrun)
+
+            if region_start >= region_end:
+                logging.info(
+                    "Skipping scene %d at %.2f: the previous clip already covers it.",
+                    i,
+                    scene_start,
+                )
+                continue
+
             search_region = (
-                scene[0],
-                _SecondsTime(min(video_duration, scene_end + overrun)),
-            ) if overrun > 0 else scene
+                (_SecondsTime(region_start), _SecondsTime(region_end))
+                if (overrun > 0 or region_start > scene_start)
+                else scene
+            )
 
             best_start = best_action_window_start(
                 search_region,
@@ -2564,6 +2583,7 @@ def process_video(video_file: Path, config: ProcessingConfig, output_dir: Path) 
                 video_times,
                 video_score,
             )
+            best_start = max(best_start, region_start)
 
             # The tail may cross the scene boundary - only the end of the source
             # video is a hard limit. Scenes often end exactly where the speaker
@@ -2602,6 +2622,7 @@ def process_video(video_file: Path, config: ProcessingConfig, output_dir: Path) 
             snapped_end = max(floor_end, min(snapped_end, max(floor_end, ceiling_end)))
             adjustment = snapped_end - (best_start + short_length)
             short_length = snapped_end - best_start
+            previous_end = best_start + short_length
 
             logging.info(
                 "Selected start %.2f for scene %d with window %.1fs (+%.1fs tail, "
