@@ -2504,9 +2504,28 @@ def process_video(video_file: Path, config: ProcessingConfig, output_dir: Path) 
 
     if final_scene_list:
         for i, scene in enumerate(final_scene_list, start=1):
-            duration = math.floor(scene[1].get_seconds() - scene[0].get_seconds())
-            # Ensure min <= max (scene might be shorter than min_short_length)
-            effective_max = min(config.max_short_length, duration)
+            scene_start = float(scene[0].get_seconds())
+            scene_end = float(scene[1].get_seconds())
+            duration = math.floor(scene_end - scene_start)
+            room = max(0.0, video_duration - scene_start)
+
+            # How long the clip should be. Scene detection cuts on what the
+            # picture does, which in continuous gameplay is nowhere near where
+            # a move starts or stops, so a scene says *where* to look, not how
+            # much to take. Letting it decide the length made every clip a
+            # different length for no reason the viewer can see, and reliably
+            # produced one clip at the 59s ceiling per run: scenes are ranked
+            # by total action, so a long scene accumulates its way into the
+            # selection and then hands over its whole length.
+            #
+            # TARGET_SHORT_LENGTH=0 restores the old behaviour.
+            target = _get_env_int("TARGET_SHORT_LENGTH", 35)
+            budget = min(target, config.max_short_length) if target > 0 else min(
+                config.max_short_length, duration
+            )
+
+            # Ensure min <= max (there may be less material left than asked for)
+            effective_max = max(1, min(budget, int(room)))
             effective_min = min(config.min_short_length, effective_max)
 
             # A tail is rendered after the action window so the clip has
@@ -2526,8 +2545,19 @@ def process_video(video_file: Path, config: ProcessingConfig, output_dir: Path) 
 
             window_length = _pick_window_length(effective_min, int(effective_max - reserve))
 
+            # A window longer than its scene has to be allowed to run past the
+            # scene's end - otherwise the clip is silently shortened back to
+            # the scene, which is the whole thing this is meant to stop. The
+            # search region grows by exactly the overrun, which leaves the
+            # start pinned to the scene and the surplus hanging off the end.
+            overrun = max(0.0, float(window_length) - (scene_end - scene_start))
+            search_region = (
+                scene[0],
+                _SecondsTime(min(video_duration, scene_end + overrun)),
+            ) if overrun > 0 else scene
+
             best_start = best_action_window_start(
-                scene,
+                search_region,
                 float(window_length),
                 audio_times,
                 audio_score,

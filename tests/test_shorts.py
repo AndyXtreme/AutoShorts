@@ -342,3 +342,55 @@ def test_a_noisy_profile_still_finds_the_end_of_the_burst():
         smooth=0.0, w_audio=1.0, w_video=0.0,
     )
     assert unsmoothed < 12.0
+
+
+# --- how long a clip should be --------------------------------------------
+def _window_budget(scene_length, room, target, monkeypatch,
+                   min_short=15, max_short=59):
+    """Reproduce the budget arithmetic the clip loop does per scene."""
+    monkeypatch.setenv("TARGET_SHORT_LENGTH", str(target))
+    duration = int(scene_length)
+    budget = min(target, max_short) if target > 0 else min(max_short, duration)
+    effective_max = max(1, min(budget, int(room)))
+    effective_min = min(min_short, effective_max)
+    return effective_min, effective_max
+
+
+def test_a_target_length_ignores_how_long_the_scene_is(monkeypatch):
+    """The complaint this exists for: one clip at the ceiling, three short."""
+    lengths = [
+        _window_budget(scene, room=600, target=35, monkeypatch=monkeypatch)[1]
+        for scene, room in ((15.5, 600), (87.1, 600), (33.0, 600), (37.1, 600))
+    ]
+    assert lengths == [35, 35, 35, 35]
+
+
+def test_without_a_target_the_scene_still_decides(monkeypatch):
+    """0 keeps the old behaviour, including the clip stuck at the maximum."""
+    lengths = [
+        _window_budget(scene, room=600, target=0, monkeypatch=monkeypatch)[1]
+        for scene in (15.5, 87.1, 33.0, 37.1)
+    ]
+    assert lengths == [15, 59, 33, 37]
+
+
+def test_the_target_never_beats_the_platform_limit(monkeypatch):
+    assert _window_budget(200, room=600, target=120, monkeypatch=monkeypatch)[1] == 59
+
+
+def test_the_end_of_the_video_still_wins(monkeypatch):
+    """Asking for 35s eight seconds before the end has to give eight."""
+    assert _window_budget(87.1, room=8, target=35, monkeypatch=monkeypatch)[1] == 8
+
+
+def test_a_window_longer_than_its_scene_starts_at_the_scene(monkeypatch):
+    """The overrun hangs off the end; the start stays where the action was found."""
+    scene = make_scene(99.75, 115.22)
+    window = 35.0
+    overrun = max(0.0, window - (115.22 - 99.75))
+    region = make_scene(99.75, 115.22 + overrun)
+    times = np.arange(0.0, 200.0, 0.1)
+    scores = np.zeros_like(times)
+
+    start = shorts.best_action_window_start(region, window, times, scores, times, scores)
+    assert start == pytest.approx(99.75, abs=0.5)

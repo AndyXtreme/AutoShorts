@@ -311,9 +311,29 @@ Which moments become clips. Applied *before* anything is rendered.
 
 | Variable | UI (Settings →) | Default | Effect |
 | :--- | :--- | :--- | :--- |
+| `TARGET_SHORT_LENGTH` | Clip Length → Target clip length | `35` | How long clips aim to be, regardless of how long the detected scene is. `0` goes back to using the scene's own length |
 | `CLIP_LENGTH_MODE` | Clip Length → Window length | `max` | `max` always takes the longest allowed window and lets dead-air removal tighten it, so runs are reproducible. `random` draws a length per clip, so reruns end at different points |
 | `MAX_SHORT_LENGTH` | Clip Length → Max short length | `59` | Upper bound of the window. The detected scene may cap it earlier |
 | `MIN_SHORT_LENGTH` | Clip Length → Min short length | `15` | How much source material is selected at minimum. Also filters out shorter scenes entirely |
+
+**Why clips used to come out wildly different lengths.** The clip was simply
+as long as its scene, capped at `MAX_SHORT_LENGTH`. Scene detection cuts on
+what the *picture* does — a camera change, a replay wipe, a lighting shift —
+which in continuous gameplay is nowhere near where a move starts or stops. So
+the length of a clip was an accident of the cut detector.
+
+It also put one clip per run at the ceiling. Scenes are ranked by *total*
+action (`ACTION_SCORE_MODE=sum`), so a long scene accumulates its way into the
+selection almost regardless of how interesting it is per second, and then hands
+over its entire length. In one measured run the selected scenes were 15.5s,
+87.1s, 33.0s and 37.1s — and the 87.1s one, the weakest of the four per second
+at 1.64 against 5.20 for the best, produced the 59-second clip.
+
+With a target length the scene says *where* to look and the action profile
+places a window of the wanted length inside it. A window longer than its scene
+runs past the scene's end rather than being shortened back to it — only
+`MAX_SHORT_LENGTH` and the end of the source are hard limits.
+
 | `CLIP_END_SNAP` | Clip Length → Snap the end to a lull | `3.0` | How far the clip end may move to land on a quiet moment instead of wherever the length budget ran out. `0` disables it |
 
 **Where a clip ends.** The window length is a budget, and a budget runs out
@@ -425,9 +445,10 @@ a target. With the default `exceed_lines`, a generous `SUBTITLE_MAX_CHARS`
 still spills onto extra lines. Set `SUBTITLE_OVERFLOW=exceed_width` for a hard
 line limit.
 
-**`MAX_SHORT_LENGTH` vs. the detected scene** — the maximum is an upper bound,
-not a target. If scene detection finds a 27-second scene, that caps the window
-regardless of a higher `MAX_SHORT_LENGTH`.
+**`MAX_SHORT_LENGTH` vs. the detected scene** — with `TARGET_SHORT_LENGTH=0`
+the maximum is an upper bound, not a target: a 27-second scene caps the window
+regardless of a higher `MAX_SHORT_LENGTH`. With a target set, the scene no
+longer caps anything.
 
 ---
 

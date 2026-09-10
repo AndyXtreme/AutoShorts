@@ -125,6 +125,14 @@ def get_schema() -> List[EnvSection]:
                          help_text="max: always take the longest allowed window and let dead-air removal "
                                    "tighten it - reproducible, and nothing at the end gets lost. "
                                    "random: draw a length per clip, so reruns end at different points"),
+                EnvField("TARGET_SHORT_LENGTH", "Target clip length (s)", "int", 35,
+                         min_value=0, max_value=300,
+                         help_text="How long clips should aim to be. Scene detection cuts on what the picture "
+                                   "does, not on where a move starts or stops, so the scene says where to look "
+                                   "rather than how much to take - a window this long is placed inside it by "
+                                   "the action profile and may run past its end. 0 goes back to using the "
+                                   "scene's own length, which makes every clip a different length and puts one "
+                                   "clip per run at the maximum"),
                 EnvField("MIN_SHORT_LENGTH", "Min short length (s)", "int_auto", 15, min_value=5, max_value=120,
                          help_text="Shortest allowed clip. Auto mode picks based on video length"),
                 EnvField("RENDER_TAIL_BUFFER", "Tail after the window (s)", "float", 1.5,
