@@ -2509,15 +2509,22 @@ def process_video(video_file: Path, config: ProcessingConfig, output_dir: Path) 
             effective_max = min(config.max_short_length, duration)
             effective_min = min(config.min_short_length, effective_max)
 
-            # Reserve a tail inside the length budget. The action window is
-            # picked for the shorter span and the reserved seconds are rendered
-            # after it, so the clip has material to fade out on. Without it the
-            # window boundary lands during or right after speech and the clip
-            # stops on the exact frame a sentence ends - or mid-word.
-            tail = _get_env_float("RENDER_TAIL_BUFFER", 1.5)
-            tail = max(0.0, min(tail, max(0.0, effective_max - effective_min)))
+            # A tail is rendered after the action window so the clip has
+            # material to fade out on; without it the boundary lands during or
+            # right after speech and the clip stops on the exact frame a
+            # sentence ends - or mid-word.
+            #
+            # It only has to be reserved from the budget when the platform
+            # limit is what caps the window. When the *scene* is the cap the
+            # tail costs nothing, because it is explicitly allowed to run past
+            # the scene boundary (see below) - reserving it there took the
+            # seconds twice and left a scene at the minimum length with no tail
+            # at all, which is exactly the case most likely to end abruptly.
+            tail = max(0.0, _get_env_float("RENDER_TAIL_BUFFER", 1.5))
+            capped_by_platform = effective_max >= config.max_short_length
+            reserve = min(tail, max(0.0, effective_max - effective_min)) if capped_by_platform else 0.0
 
-            window_length = _pick_window_length(effective_min, int(effective_max - tail))
+            window_length = _pick_window_length(effective_min, int(effective_max - reserve))
 
             best_start = best_action_window_start(
                 scene,
@@ -2534,6 +2541,7 @@ def process_video(video_file: Path, config: ProcessingConfig, output_dir: Path) 
             # so clamping to the scene would leave the tail at zero.
             short_length = min(
                 window_length + tail,
+                float(config.max_short_length),
                 max(0.0, video_duration - best_start),
             )
             short_length = max(float(window_length), short_length)
