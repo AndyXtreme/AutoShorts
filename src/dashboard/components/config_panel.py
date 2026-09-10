@@ -48,10 +48,18 @@ def _render_field(field, current_value):
         )
     if field.field_type == "int_auto":
         is_auto = int(current_value) == 0
+        # The name goes on its own line above the row. With Auto on, the number
+        # input is not drawn at all, so the toggle used to be the only thing on
+        # the row - and read as a switch belonging to whatever setting sat
+        # above it, which is exactly how it was reported.
+        st.markdown(f"**{field.label}**")
         col1, col2 = st.columns([1, 2])
-        auto_checked = col1.toggle("Auto", value=is_auto, key=f"{key}_auto", help="Let system decide automatically")
+        auto_checked = col1.toggle(
+            "Auto", value=is_auto, key=f"{key}_auto",
+            help=field.help_text or "Let the pipeline calculate this value",
+        )
         if auto_checked:
-            col2.caption(f"_{field.label}: Auto-calculated_")
+            col2.caption("Calculated from the video length and the scene limit")
             return 0
         else:
             manual_value = int(current_value) if int(current_value) > 0 else int(field.min_value or 30)
