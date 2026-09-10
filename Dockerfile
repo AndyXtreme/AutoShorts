@@ -110,10 +110,35 @@ WORKDIR /app
 # Same FFmpeg build decord was compiled against in the builder stage.
 RUN conda install -y -c conda-forge "ffmpeg=4.4.2" && conda clean -afy
 
-ENV FFMPEG_BINARY=/opt/conda/bin/ffmpeg
+# A second, modern FFmpeg alongside the conda one. It is a static build, so
+# it shares no libraries with the 4.4.2 above and cannot disturb the ABI
+# decord is linked against - decord keeps the old libraries, everything that
+# shells out to ffmpeg/ffprobe gets this one.
+#
+# The conda build is from 2021 and has neither libdav1d nor av1_nvenc, which
+# makes AV1 unusable in both directions: decoding fails outright ("Cannot
+# determine format of input stream 0:0 after EOF") and there is no AV1 encoder
+# to write the finished shorts with. Pinned to a dated release rather than the
+# rolling "latest" tag so the image stays reproducible.
+ARG FFMPEG_BUILD=autobuild-2026-09-09-14-51
+ARG FFMPEG_ARCHIVE=ffmpeg-n9.0.1-27-g9b0578816c-linux64-gpl-9.0
+RUN apt-get update && apt-get install -y --no-install-recommends curl xz-utils && \
+    curl -fsSL -o /tmp/ffmpeg.tar.xz \
+        "https://github.com/BtbN/FFmpeg-Builds/releases/download/${FFMPEG_BUILD}/${FFMPEG_ARCHIVE}.tar.xz" && \
+    tar -xJf /tmp/ffmpeg.tar.xz -C /tmp && \
+    mv "/tmp/${FFMPEG_ARCHIVE}/bin/ffmpeg" /usr/local/bin/ffmpeg && \
+    mv "/tmp/${FFMPEG_ARCHIVE}/bin/ffprobe" /usr/local/bin/ffprobe && \
+    chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe && \
+    rm -rf /tmp/ffmpeg.tar.xz "/tmp/${FFMPEG_ARCHIVE}" && \
+    apt-get purge -y curl xz-utils && apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/*
+
+# /opt/conda/bin comes first in the base image's PATH, so the new binaries
+# have to be put in front of it explicitly.
+ENV PATH=/usr/local/bin:$PATH
+ENV FFMPEG_BINARY=/usr/local/bin/ffmpeg
+ENV FFPROBE_BINARY=/usr/local/bin/ffprobe
 ENV LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/local/cuda/lib64:$LD_LIBRARY_PATH
-ENV DECORD_EOF_RETRY_MAX=65536
-ENV DECORD_SKIP_TAIL_FRAMES=0
 ENV NVIDIA_DRIVER_CAPABILITIES=all
 
 # FlashAttention for the TTS path. Matched to the base image's torch 2.8;
@@ -171,6 +196,15 @@ major, minor = (int(p) for p in torch.version.cuda.split('.')[:2]); \
 assert (major, minor) >= (12, 8), f'CUDA {torch.version.cuda} has no sm_120 support'; \
 assert importlib.util.find_spec('decord'), 'decord not installed'; \
 print(f'PyTorch {torch.__version__} (CUDA {torch.version.cuda}), FlashAttention {flash_attn.__version__}, decord present')"
+
+# AV1 needs a decoder to read the source and an encoder to write the short,
+# and neither exists in the conda FFmpeg. Assert the new one is what PATH
+# resolves to and that it carries both - the alternative is finding out
+# halfway through a render.
+RUN ffmpeg -hide_banner -decoders | grep -q libdav1d && \
+    ffmpeg -hide_banner -encoders | grep -q av1_nvenc && \
+    ffmpeg -hide_banner -encoders | grep -q hevc_nvenc && \
+    echo "FFmpeg $(ffmpeg -version | head -1 | cut -d' ' -f3): AV1 decode and encode present"
 
 # The sed strips CRLF so the script still runs when the build context comes
 # from a Windows checkout.

@@ -357,6 +357,30 @@ a 2560×1440 recording is 810×1440 — with the default cap that renders at
 1080×1920. YouTube buckets vertical video by its short edge, so 1080 wide is
 what puts a Short in the 1080p tier.
 
+### Codecs
+
+| Variable | UI (Settings →) | Default | Effect |
+| :--- | :--- | :--- | :--- |
+| `OUTPUT_VIDEO_CODEC` | Core Settings → Output codec | `auto` | Codec the finished Shorts are written in. `auto` matches the source; `hevc`, `av1` or `h264` force one |
+
+Source material is read with whatever can actually decode it. decord decodes
+H.264 and HEVC on the GPU through NVDEC and is the fast path, but it has no AV1
+support at all — its NVDEC parser rejects the codec outright, and the FFmpeg 4.x
+libraries its API requires have no AV1 decoder either. AV1 sources are therefore
+decoded through an FFmpeg pipe (`libdav1d`, roughly 10× realtime for 1440p60),
+which the pipeline picks automatically from the codec in the file.
+
+Output follows the source. The caption stage renders through movielite, which
+hardcodes libx264, so every clip arrives at the end of the pipeline as H.264
+regardless of what went in; a final pass re-encodes it to the codec the source
+used — `av1_nvenc` for an AV1 recording, `hevc_nvenc` for an H.265 one. Set
+`OUTPUT_VIDEO_CODEC` to override.
+
+> The image ships **two** FFmpeg builds on purpose. decord's API pins it to the
+> 4.4.2 conda build from 2021, which has neither `libdav1d` nor `av1_nvenc`.
+> A modern static build sits in `/usr/local/bin` ahead of it on `PATH` and
+> handles everything that shells out; decord keeps the old libraries.
+
 
 ### How the settings interact
 
@@ -486,6 +510,8 @@ DEBUG_RENDERED_CLIPS="generated/test_clip.mp4:action"
 | **NVENC Error** | Falls back to `libx264` automatically; check GPU driver |
 | **PyCaps fails** | Falls back to FFmpeg burn-in subtitles automatically |
 | **Clip is only 720p** | Raise `MAX_OUTPUT_HEIGHT` (Core Settings → Max output height). `1920` gives 1080×1920 |
+| **AV1 file shows nothing in the queue** | Rebuild the image — the old one shipped only FFmpeg 4.4, which cannot decode AV1 |
+| **Short came out H.264** | `OUTPUT_VIDEO_CODEC` is forced; set it back to `auto` to match the source |
 | **API rate limits** | Switch to `gpt-5-mini` (10M free tokens/day) or use `local` provider |
 
 ---

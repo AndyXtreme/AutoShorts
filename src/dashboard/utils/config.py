@@ -55,6 +55,11 @@ def get_schema() -> List[EnvSection]:
                                    "2560 = 1440x2560, 3840 = 2160x3840. The clip uses the smallest of these that "
                                    "is still at least as tall as the cropped source, so nothing gets downscaled "
                                    "needlessly. 1920 is the right choice for YouTube Shorts"),
+                EnvField("OUTPUT_VIDEO_CODEC", "Output codec", "select", "auto",
+                         options=["auto", "hevc", "av1", "h264"],
+                         help_text="Codec the finished Shorts are written in. 'auto' matches the source: "
+                                   "an AV1 recording gives AV1 Shorts, an H.265 one gives H.265. The caption "
+                                   "stage always renders H.264 internally, so a final pass re-encodes to this"),
             ],
         ),
         EnvSection(

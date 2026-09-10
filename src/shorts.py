@@ -48,7 +48,6 @@ import cupyx.scipy.ndimage
 import torch
 import torchaudio
 import decord
-from decord import VideoReader, cpu, gpu
 from tqdm import tqdm
 
 # AI Provider and Subtitle modules
@@ -58,6 +57,7 @@ from ai_providers import (
     extract_candidate_clip,
 )
 from subtitle_generator import generate_subtitles, is_subtitles_enabled
+from video_io import match_output_codec, open_reader, probe_video
 
 # Load environment variables from a .env file if present.
 load_dotenv()
@@ -375,19 +375,13 @@ def analyze_video_content(
 
     scene_threshold, action_fps = analysis_settings(scene_threshold, action_fps)
 
-    # 1) Probe video for resolution and FPS (CPU lightweight probe)
-    try:
-        vr_probe = VideoReader(str(video_path), ctx=cpu(0))
-        h0, w0, _ = vr_probe[0].shape
-        fps = float(vr_probe.get_avg_fps())
-        del vr_probe
-    except Exception:
-        # Fallback
-        vr_probe = VideoReader(str(video_path))
-        h0, w0, _ = vr_probe[0].shape
-        fps = float(vr_probe.get_avg_fps())
-        del vr_probe
-        
+    # 1) Probe for resolution and FPS. ffprobe answers this from the
+    #    container headers, without opening a decoder at all.
+    probe = probe_video(video_path)
+    w0, h0, fps = probe.width, probe.height, probe.fps
+    if w0 <= 0 or h0 <= 0:
+        raise ValueError(f"No readable video stream in {video_path}")
+
     if fps <= 0:
         fps = 30.0
 
@@ -402,17 +396,11 @@ def analyze_video_content(
     w_eff = max(1, int(w0 / downscale))
     h_eff = max(1, int(h0 / downscale))
 
-    # 3) Setup VideoReader on GPU
-    ctx = gpu(0) if torch.cuda.is_available() else cpu(0)
-    try:
-        # Batch size 96 is a good balance between throughput and responsiveness
-        # num_threads=4 for background decoding
-        vr = VideoReader(str(video_path), ctx=ctx, width=w_eff, height=h_eff, num_threads=4)
-        using_gpu = True
-    except Exception as e:
-        logging.warning(f"VideoReader GPU open failed: {e}. Falling back to CPU.")
-        vr = VideoReader(str(video_path), ctx=cpu(0), width=w_eff, height=h_eff, num_threads=8)
-        using_gpu = False
+    # 3) Open the reader. decord decodes on the GPU where it can; AV1 and
+    #    anything else it has no decoder for comes through an FFmpeg pipe.
+    vr = open_reader(
+        video_path, want_gpu=True, width=w_eff, height=h_eff, num_threads=4
+    )
 
     frame_count = len(vr)
     if frame_count == 0:
@@ -1206,14 +1194,12 @@ def get_render_params(
 ) -> RenderParams:
     """Calculate all parameters needed for rendering the final clip."""
 
-    # Use decord CPU to get dimensions quickly
-    try:
-        vr = VideoReader(str(video_path), ctx=cpu(0))
-        h, w, _ = vr[0].shape
-    except Exception:
-        # Fallback to GPU context if CPU fails (unlikely)
-        vr = VideoReader(str(video_path))
-        h, w, _ = vr[0].shape
+    # Dimensions come from the container headers - no decoder needed, and it
+    # works for codecs decord cannot open.
+    source = probe_video(video_path)
+    w, h = source.width, source.height
+    if w <= 0 or h <= 0:
+        raise ValueError(f"No readable video stream in {video_path}")
 
     # Calculate crop parameters (same logic as before: crop to target ratio)
     current_ratio = w / h
@@ -1296,14 +1282,8 @@ def render_video_gpu(
     subprocess.run(cmd_audio, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 
     # 2. Setup FFMPEG process
-    fps = 30.0
-    try:
-        vr_probe = VideoReader(str(params.source_path), ctx=cpu(0))
-        src_fps = vr_probe.get_avg_fps()
-        fps = min(src_fps, 60.0)
-        del vr_probe  # Clean up immediately
-    except Exception:
-        fps = 30.0
+    src_fps = probe_video(params.source_path).fps
+    fps = min(src_fps, 60.0) if src_fps > 0 else 30.0
 
     cmd_ffmpeg = [
         "ffmpeg", "-y",
@@ -1357,17 +1337,14 @@ def render_video_gpu(
     # Use torch.no_grad() to prevent graph building overhead
     with torch.no_grad():
         try:
-            ctx = gpu(0) if torch.cuda.is_available() else cpu(0)
-
             # Calculation of dims (omitted full recalc for brevity, logic stays same)
             fg_w = params.output_width
             fg_h = int(params.crop_h * (params.output_width / params.crop_w))
 
             # ... [Background dims logic from original script stays here] ...
             # Re-implementing simplified BG logic for context:
-            vr_temp = VideoReader(str(params.source_path), ctx=cpu(0))
-            src_h, src_w, _ = vr_temp[0].shape
-            del vr_temp  # Important: delete CPU reader immediately
+            src_probe = probe_video(params.source_path)
+            src_w, src_h = src_probe.width, src_probe.height
 
             if params.is_vertical_bg:
                 bg_ratio_w, bg_ratio_h = 9, 16
@@ -1382,7 +1359,7 @@ def render_video_gpu(
                 bg_crop_x, bg_crop_y = int(src_w * 0.5 - bg_crop_w / 2), int(src_h * 0.5 - bg_crop_h / 2)
 
             # Main Reader - Created ONCE. Do not recreate in loop.
-            vr = VideoReader(str(params.source_path), ctx=ctx)
+            vr = open_reader(params.source_path, want_gpu=torch.cuda.is_available())
 
             total_frames = int(params.duration * fps)
             src_fps_val = vr.get_avg_fps()
@@ -2232,12 +2209,12 @@ def process_video(video_file: Path, config: ProcessingConfig, output_dir: Path) 
         
         # Get video duration FIRST for auto-config (before scene processing)
         try:
-            vr_probe = VideoReader(str(video_file), ctx=cpu(0))
-            video_duration = len(vr_probe) / vr_probe.get_avg_fps()
-            del vr_probe
+            video_duration = probe_video(video_file).duration
+            if video_duration <= 0:
+                raise ValueError("no duration in the container headers")
             gc.collect()  # Ensure file handle is released
         except Exception:
-            logging.warning("Decord probe failed, using MoviePy to check duration.")
+            logging.warning("ffprobe failed, using MoviePy to check duration.")
             from moviepy import VideoFileClip
             video_clip = VideoFileClip(str(video_file))
             video_duration = video_clip.duration
@@ -2355,11 +2332,11 @@ def process_video(video_file: Path, config: ProcessingConfig, output_dir: Path) 
         
         # Get video duration
         try:
-            vr_probe = VideoReader(str(video_file), ctx=cpu(0))
-            video_duration = len(vr_probe) / vr_probe.get_avg_fps()
-            del vr_probe
+            video_duration = probe_video(video_file).duration
+            if video_duration <= 0:
+                raise ValueError("no duration in the container headers")
         except Exception:
-            logging.warning("Decord probe failed, using MoviePy to check duration.")
+            logging.warning("ffprobe failed, using MoviePy to check duration.")
             from moviepy import VideoFileClip
             video_clip = VideoFileClip(str(video_file))
             video_duration = video_clip.duration
@@ -2702,6 +2679,16 @@ def process_video(video_file: Path, config: ProcessingConfig, output_dir: Path) 
                 except Exception as e:
                     logging.error(f"Error adding subtitles to {clip_path.name}: {e}")
     
+    # The caption stage renders through movielite, which hardcodes libx264, so
+    # everything arrives here as H.264 regardless of what went in. Put the
+    # clips back into the source's codec: an AV1 recording yields AV1 shorts,
+    # an HEVC one yields HEVC.
+    for clip_path, _, _ in rendered_clips:
+        try:
+            match_output_codec(clip_path, video_file)
+        except Exception as e:
+            logging.warning(f"Could not match output codec for {clip_path.name}: {e}")
+
     logging.info(f"Processing complete: {len(rendered_clips)} clips generated")
 
 
