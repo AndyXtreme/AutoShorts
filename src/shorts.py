@@ -17,6 +17,9 @@ import math
 import random
 import os
 import sys
+import warnings
+import importlib
+from contextlib import contextmanager
 
 # Force NVRTC to use C++17 to avoid "libcu++ requires at least C++ 17" error
 # CuPy uses NVRTC for JIT compilation, which needs these flags
@@ -709,6 +712,52 @@ def rgb_to_hsv_torch(image: torch.Tensor, epsilon: float = 1e-10) -> torch.Tenso
 
 # --- Audio-based action scoring (GPU) -------------------------------------------
 
+@contextmanager
+def _quiet_libav():
+    """Silence FFmpeg's own logging for the duration of a call.
+
+    torchaudio.load opens the whole container, and FFmpeg probes every stream
+    it finds - including the video one. The 4.x libraries torchaudio is linked
+    against decode AV1 with libaom, which cannot read a modern AV1 stream, so
+    an AV1 source produces several hundred lines of "Failed to decode frame:
+    Corrupt frame detected" per run for a stream nobody asked for. The audio it
+    was actually called for comes back intact.
+
+    Failures that matter still surface: torchaudio raises, and the caller logs
+    that. This only hides FFmpeg's running commentary.
+    """
+    module = None
+    for name in ("torio.utils.ffmpeg_utils", "torchaudio.utils.ffmpeg_utils"):
+        try:
+            module = importlib.import_module(name)
+            break
+        except ImportError:
+            continue
+    if module is None:
+        yield
+        return
+
+    previous = None
+    try:
+        with warnings.catch_warnings():           # the accessors are deprecated
+            warnings.simplefilter("ignore")
+            previous = module.get_log_level()
+            module.set_log_level(-8)              # AV_LOG_QUIET
+    except Exception:
+        yield
+        return
+
+    try:
+        yield
+    finally:
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                module.set_log_level(previous)
+        except Exception:
+            pass
+
+
 def compute_audio_action_profile(
     video_path: Path,
     frame_length: int = 2048,
@@ -727,7 +776,8 @@ def compute_audio_action_profile(
     # normalize=True loads as float32 in [-1, 1]
     # We do NOT move the full waveform to GPU.
     try:
-        waveform, sample_rate = torchaudio.load(str(video_path), normalize=True)
+        with _quiet_libav():
+            waveform, sample_rate = torchaudio.load(str(video_path), normalize=True)
     except Exception as e:
         logging.error(f"Failed to load audio from {video_path}: {e}")
         return np.array([]), np.array([])
