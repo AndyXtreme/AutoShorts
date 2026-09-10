@@ -59,7 +59,8 @@ def get_schema() -> List[EnvSection]:
                          options=["auto", "hevc", "av1", "h264"],
                          help_text="Codec the finished Shorts are written in. 'auto' matches the source: "
                                    "an AV1 recording gives AV1 Shorts, an H.265 one gives H.265. The caption "
-                                   "stage always renders H.264 internally, so a final pass re-encodes to this"),
+                                   "renderer is switched to this codec directly, so there is no H.264 "
+                                   "generation in between"),
             ],
         ),
         EnvSection(
@@ -133,6 +134,12 @@ def get_schema() -> List[EnvSection]:
                                    "right after speech and the clip stops on the exact frame - or mid-word"),
                 EnvField("MAX_SHORT_LENGTH", "Max short length (s)", "int_auto", 59, min_value=15, max_value=300,
                          help_text="Longest allowed clip. 59s keeps clips inside the YouTube Shorts limit"),
+                EnvField("CLIP_END_SNAP", "Snap the end to a lull (s)", "float", 3.0,
+                         min_value=0.0, max_value=15.0, step=0.5,
+                         help_text="How far the clip end may move to land on a quiet moment instead of "
+                                   "wherever the length budget ran out. Stops clips ending halfway through "
+                                   "a move, or a second into the next one. Never goes below the minimum "
+                                   "length or above the maximum. 0 disables it"),
                 EnvField("MAX_COMBINED_SCENE_LENGTH", "Max combined scene (s)", "int_auto", 0, min_value=30, max_value=600,
                          help_text="Max length when merging multiple scenes. Auto adjusts based on scene limit"),
             ],

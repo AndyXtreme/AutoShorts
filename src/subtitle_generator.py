@@ -13,6 +13,7 @@ import os
 import re
 import subprocess
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -527,7 +528,8 @@ def apply_pycaps_subtitles(
     srt_path: Path,
     output_path: Path,
     config: Optional[SubtitleConfig] = None,
-    word_lists: dict = None
+    word_lists: dict = None,
+    output_codec: Optional[str] = None
 ) -> bool:
     """Apply animated subtitles using PyCaps (TemplateLoader API).
     
@@ -537,7 +539,9 @@ def apply_pycaps_subtitles(
         output_path: Path for output video with subtitles
         config: Subtitle styling configuration
         word_lists: Dictionary of word lists for SemanticTagger
-        
+        output_codec: Codec the caption renderer should write, instead of its
+            hardcoded libx264. None leaves it alone.
+
     Returns:
         True if successful
     """
@@ -554,7 +558,7 @@ def apply_pycaps_subtitles(
     ctx = multiprocessing.get_context("spawn")  # Use spawn for better compatibility
     p = ctx.Process(
         target=_run_pycaps_worker,
-        args=(str(video_path), str(srt_path), str(output_path), config, word_lists)
+        args=(str(video_path), str(srt_path), str(output_path), config, word_lists, output_codec)
     )
     p.start()
     p.join()
@@ -628,7 +632,70 @@ def _check_for_fallback_output(video_path: Path, output_path: Path) -> bool:
     return False
 
 
-def _run_pycaps_worker(video_path_str: str, srt_path_str: str, output_path_str: str, config: SubtitleConfig, word_lists: dict = None):
+@contextmanager
+def _caption_encoder(codec: Optional[str], quality: Optional[str]):
+    """Make movielite's writer encode in `codec` instead of libx264.
+
+    The caption stage decodes every frame and writes a new file, so its
+    encoder decides what the viewer actually gets. movielite hardcodes
+    libx264 ("We will soon support other encodings"), which used to make the
+    finished clip H.264 whatever the source was, and cost a whole extra
+    generation to put right afterwards.
+
+    Replacing VideoWriter._render_range would mean carrying a copy of its
+    render loop. Swapping the encoder arguments in the command it hands to
+    Popen is the smaller surface: everything around it - part splitting,
+    concat, audio muxing - copies the video stream and is untouched.
+
+    A command that does not look the way it did when this was written is
+    passed through unchanged, and video_io's final pass still puts the clip
+    into the right codec, one generation later.
+    """
+    if not codec:
+        yield False
+        return
+    try:
+        from movielite.core import video_writer
+    except ImportError:
+        yield False
+        return
+
+    from video_io import video_encoder_args
+
+    replacement = video_encoder_args(codec, quality)
+    original_popen = video_writer.subprocess.Popen
+    swapped = []
+
+    def popen(args, *rest, **kwargs):
+        # video_writer.subprocess is the stdlib module itself, so this hook
+        # sees every Popen the worker makes while the pipeline runs. Match the
+        # writer's command precisely - raw frames in on a pipe, libx264 out -
+        # and let everything else through untouched.
+        if (
+            isinstance(args, (list, tuple))
+            and "rawvideo" in args
+            and "libx264" in args
+            and "pipe:0" in args
+            and "-c:v" in args
+        ):
+            args = list(args)
+            start = args.index("-c:v")
+            # The encoder block runs from -c:v up to the muxer flags that
+            # follow it; bounded that way rather than by a token count, so a
+            # changed preset or crf option does not shift the slice.
+            end = args.index("-movflags") if "-movflags" in args else start + 6
+            args = args[:start] + list(replacement) + args[end:]
+            swapped.append(replacement[1])
+        return original_popen(args, *rest, **kwargs)
+
+    video_writer.subprocess.Popen = popen
+    try:
+        yield swapped
+    finally:
+        video_writer.subprocess.Popen = original_popen
+
+
+def _run_pycaps_worker(video_path_str: str, srt_path_str: str, output_path_str: str, config: SubtitleConfig, word_lists: dict = None, output_codec: Optional[str] = None):
     """Worker function to run PyCaps in a separate process."""
     # Re-import necessary modules in the spawned process
     import sys
@@ -1041,8 +1108,14 @@ def _run_pycaps_worker(video_path_str: str, srt_path_str: str, output_path_str: 
         
         # Build pipeline
         pipeline = builder.build()
-        
-        pipeline.run()
+
+        with _caption_encoder(output_codec, quality_name) as swapped:
+            pipeline.run()
+        if output_codec and not swapped:
+            print(
+                f"Caption renderer kept its own encoder; the clip will be "
+                f"re-encoded to {output_codec} afterwards."
+            )
         
     except Exception as e:
         # Use print because logging might not be configured in child process
@@ -1935,7 +2008,21 @@ def generate_subtitles(
                     logging.warning(f"Could not extend video: {e}")
         
         # Apply subtitles using PyCaps (to the potentially extended video)
-        success = apply_pycaps_subtitles(video_for_pycaps, srt_path, output_path, config, word_lists=word_lists)
+        # Let the caption renderer write the codec the source used, rather
+        # than its hardcoded H.264 and a re-encode afterwards.
+        output_codec = None
+        if render_meta and render_meta.get("source_path"):
+            try:
+                from video_io import target_codec_for
+
+                output_codec = target_codec_for(render_meta["source_path"])
+            except Exception as e:
+                logging.warning(f"Could not determine the output codec: {e}")
+
+        success = apply_pycaps_subtitles(
+            video_for_pycaps, srt_path, output_path, config,
+            word_lists=word_lists, output_codec=output_codec,
+        )
         
         # DON'T clean up extended video yet - we need its audio track for TTS mixing!
         # PyCaps strips audio, so we need it from the source video

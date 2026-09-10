@@ -314,6 +314,24 @@ Which moments become clips. Applied *before* anything is rendered.
 | `CLIP_LENGTH_MODE` | Clip Length → Window length | `max` | `max` always takes the longest allowed window and lets dead-air removal tighten it, so runs are reproducible. `random` draws a length per clip, so reruns end at different points |
 | `MAX_SHORT_LENGTH` | Clip Length → Max short length | `59` | Upper bound of the window. The detected scene may cap it earlier |
 | `MIN_SHORT_LENGTH` | Clip Length → Min short length | `15` | How much source material is selected at minimum. Also filters out shorter scenes entirely |
+| `CLIP_END_SNAP` | Clip Length → Snap the end to a lull | `3.0` | How far the clip end may move to land on a quiet moment instead of wherever the length budget ran out. `0` disables it |
+
+**Where a clip ends.** The window length is a budget, and a budget runs out
+mid-action as often as not — either the move being filmed is not finished and
+the clip stops halfway through it, or the next one has already begun and the
+clip carries a second of something the viewer never sees the end of. Both read
+as a mistake rather than an edit.
+
+The action profile already knows where the lulls are, so the end moves to the
+quietest point within `CLIP_END_SNAP` seconds either way — whichever lull is
+nearest. A clip whose budget ran out just after something started pulls back
+in front of it; one that stopped halfway through runs on until it is over.
+`MIN_SHORT_LENGTH` and `MAX_SHORT_LENGTH` stay hard limits, so this never
+takes a clip under the minimum or past the platform's minute.
+
+> This matters most for scenes shorter than `MIN_SHORT_LENGTH`, where the
+> window is forced to the whole scene and `RENDER_TAIL_BUFFER` is squeezed to
+> zero — exactly the case that needs the room.
 
 ### Dead Air Removal
 
@@ -370,11 +388,13 @@ libraries its API requires have no AV1 decoder either. AV1 sources are therefore
 decoded through an FFmpeg pipe (`libdav1d`, roughly 10× realtime for 1440p60),
 which the pipeline picks automatically from the codec in the file.
 
-Output follows the source. The caption stage renders through movielite, which
-hardcodes libx264, so every clip arrives at the end of the pipeline as H.264
-regardless of what went in; a final pass re-encodes it to the codec the source
-used — `av1_nvenc` for an AV1 recording, `hevc_nvenc` for an H.265 one. Set
-`OUTPUT_VIDEO_CODEC` to override.
+Output follows the source. movielite, which the caption stage renders through,
+hardcodes libx264; the pipeline swaps that encoder out at the moment the
+command is issued, so the captioned clip is written straight to `av1_nvenc`
+for an AV1 recording or `hevc_nvenc` for an H.265 one, with no H.264
+generation in between. If that swap ever fails to apply — an upstream change
+to the command it builds — a final pass re-encodes instead, one generation
+later but still the right codec. Set `OUTPUT_VIDEO_CODEC` to override.
 
 > The image ships **two** FFmpeg builds on purpose. decord's API pins it to the
 > 4.4.2 conda build from 2021, which has neither `libdav1d` nor `av1_nvenc`.

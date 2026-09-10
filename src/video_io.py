@@ -401,16 +401,56 @@ def target_codec_for(source_path) -> str:
     return target_codec(probe_video(source_path).codec)
 
 
-def video_encoder_args(codec: str) -> List[str]:
+# The chains above are tuned for "high". Other quality levels shift the
+# quantiser and, on NVENC, the preset - p1 is fastest, p7 slowest and best.
+_QUALITY_TUNING: Dict[str, Tuple[int, str]] = {
+    "low": (6, "p3"),
+    "middle": (3, "p4"),
+    "high": (0, "p5"),
+    "very_high": (-3, "p6"),
+}
+
+
+def _apply_quality(args: List[str], quality: Optional[str]) -> List[str]:
+    """Shift an encoder's quantiser and preset to match a quality level."""
+    if not quality:
+        return args
+    tuning = _QUALITY_TUNING.get(quality.strip().lower())
+    if tuning is None:
+        logging.warning(
+            f"Unknown quality '{quality}', encoding at the default instead. "
+            f"Valid: {', '.join(_QUALITY_TUNING)}."
+        )
+        return args
+
+    offset, nvenc_preset = tuning
+    tuned = list(args)
+    for flag in ("-cq", "-crf"):
+        if flag in tuned:
+            index = tuned.index(flag) + 1
+            try:
+                tuned[index] = str(max(0, int(tuned[index]) + offset))
+            except (ValueError, IndexError):
+                pass
+    # Only NVENC uses the pN scale; libx264/libx265/SVT-AV1 presets are named
+    # or numeric and are left as the chain set them.
+    if "-preset" in tuned:
+        index = tuned.index("-preset") + 1
+        if index < len(tuned) and tuned[index].startswith("p") and tuned[index][1:].isdigit():
+            tuned[index] = nvenc_preset
+    return tuned
+
+
+def video_encoder_args(codec: str, quality: Optional[str] = None) -> List[str]:
     """FFmpeg output arguments for `codec`, hardware where the build has it."""
     chain = _ENCODER_CHAINS.get(codec) or _ENCODER_CHAINS["hevc"]
     encoders = available_encoders()
     for name, args in chain:
         if not encoders or name in encoders:
-            return ["-c:v", name] + args
+            return ["-c:v", name] + _apply_quality(args, quality)
     name, args = chain[-1]
     logging.warning(f"No encoder for {codec} found in this FFmpeg build; trying {name}.")
-    return ["-c:v", name] + args
+    return ["-c:v", name] + _apply_quality(args, quality)
 
 
 def match_output_codec(clip_path: Path, source_path: Path) -> bool:

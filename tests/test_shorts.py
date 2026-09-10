@@ -1,6 +1,7 @@
 import sys
 from unittest.mock import MagicMock, patch
 import numpy as np
+import pytest
 from pathlib import Path
 
 # --- Mock GPU libraries BEFORE importing shorts ---
@@ -60,6 +61,7 @@ from shorts import (  # noqa: E402
     select_background_resolution,
     ProcessingConfig,
     analysis_settings,
+    snap_clip_end,
     _SecondsTime,
 )
 
@@ -201,3 +203,142 @@ def test_main_skips_files_that_are_not_videos(tmp_path, monkeypatch):
 
     shorts.main([str(note)])
     assert processed == []
+
+
+# --- where a clip ends -----------------------------------------------------
+def _burst_profile(start: float, end: float, span: float = 30.0, step: float = 0.1):
+    """A flat action profile with one burst of activity in [start, end)."""
+    times = np.arange(0.0, span, step)
+    scores = np.where((times >= start) & (times < end), 1.0, 0.0)
+    return times, scores
+
+
+def test_the_end_moves_past_an_unfinished_move():
+    """A scene shorter than the minimum length used to stop dead mid-action.
+
+    The clip cannot be shortened here (earliest == the nominal end), so the
+    only way out is forward, to where the burst finishes.
+    """
+    times, scores = _burst_profile(8.0, 12.0)
+    end = snap_clip_end(
+        10.0, earliest=10.0, latest=30.0,
+        audio_times=times, audio_score=scores, search=3.0,
+        w_audio=1.0, w_video=0.0,
+    )
+    # The profile is smoothed over a second before the lull is looked for, so
+    # the envelope reaches its floor about half a window after the burst
+    # actually stops. What matters is that the end is past it, not inside.
+    assert 12.0 <= end <= 13.0
+
+
+def test_the_end_pulls_back_out_of_the_next_move():
+    """The budget ran a moment into whatever started next; drop that moment."""
+    times, scores = _burst_profile(20.0, 26.0)
+    end = snap_clip_end(
+        21.0, earliest=10.0, latest=21.5,
+        audio_times=times, audio_score=scores, search=3.0,
+        w_audio=1.0, w_video=0.0,
+    )
+    assert 18.5 <= end <= 20.0
+
+
+def test_an_end_that_is_already_quiet_does_not_move():
+    times, scores = _burst_profile(5.0, 9.0)
+    end = snap_clip_end(
+        15.0, earliest=10.0, latest=25.0,
+        audio_times=times, audio_score=scores, search=3.0,
+        w_audio=1.0, w_video=0.0,
+    )
+    assert end == pytest.approx(15.0, abs=0.15)
+
+
+def test_the_minimum_length_is_a_hard_floor():
+    """Pulling back must never take the clip under the length that was asked for."""
+    times, scores = _burst_profile(18.0, 26.0)
+    end = snap_clip_end(
+        20.0, earliest=19.5, latest=30.0,
+        audio_times=times, audio_score=scores, search=3.0,
+        w_audio=1.0, w_video=0.0,
+    )
+    assert end >= 19.5
+
+
+def test_the_maximum_length_is_a_hard_ceiling():
+    """Growing past the platform's limit is worse than an imperfect cut."""
+    times, scores = _burst_profile(8.0, 20.0)
+    end = snap_clip_end(
+        10.0, earliest=10.0, latest=11.0,
+        audio_times=times, audio_score=scores, search=5.0,
+        w_audio=1.0, w_video=0.0,
+    )
+    assert end <= 11.0
+
+
+def test_a_flat_profile_leaves_the_end_alone():
+    times = np.arange(0.0, 30.0, 0.1)
+    scores = np.zeros_like(times)
+    end = snap_clip_end(
+        15.0, earliest=10.0, latest=25.0,
+        audio_times=times, audio_score=scores, search=3.0,
+        w_audio=1.0, w_video=0.0,
+    )
+    assert end == pytest.approx(15.0)
+
+
+def test_snapping_can_be_switched_off():
+    times, scores = _burst_profile(8.0, 12.0)
+    end = snap_clip_end(
+        10.0, earliest=5.0, latest=25.0,
+        audio_times=times, audio_score=scores, search=0.0,
+        w_audio=1.0, w_video=0.0,
+    )
+    assert end == pytest.approx(10.0)
+
+
+def test_motion_counts_towards_the_lull_as_well():
+    """Silent but busy footage is not a good place to end either."""
+    times = np.arange(0.0, 30.0, 0.1)
+    quiet_audio = np.zeros_like(times)
+    motion = np.where((times >= 8.0) & (times < 12.0), 1.0, 0.0)
+    end = snap_clip_end(
+        10.0, earliest=10.0, latest=30.0,
+        audio_times=times, audio_score=quiet_audio,
+        video_times=times, video_score=motion,
+        search=3.0, w_audio=0.6, w_video=0.4,
+    )
+    assert 12.0 <= end <= 13.0
+
+
+def test_no_action_profile_leaves_the_end_alone():
+    assert snap_clip_end(
+        10.0, earliest=5.0, latest=25.0,
+        audio_times=np.array([]), audio_score=np.array([]), search=3.0,
+    ) == pytest.approx(10.0)
+
+
+def test_a_noisy_profile_still_finds_the_end_of_the_burst():
+    """The reason the profile is smoothed at all.
+
+    Audio action is sampled every 11ms and neighbouring samples routinely
+    differ by a whole standard deviation. Searching that for the single
+    quietest sample finds noise, not a lull, and hands back the frame the
+    length budget had already chosen.
+    """
+    rng = np.random.default_rng(0)
+    times = np.arange(0.0, 30.0, 0.011)
+    burst = np.where((times >= 8.0) & (times < 12.0), 1.0, 0.0)
+    noisy = burst + rng.normal(0.0, 0.8, size=times.shape)
+
+    end = snap_clip_end(
+        10.0, earliest=10.0, latest=30.0,
+        audio_times=times, audio_score=noisy, search=3.0,
+        w_audio=1.0, w_video=0.0,
+    )
+    assert 12.0 <= end <= 13.0
+
+    unsmoothed = snap_clip_end(
+        10.0, earliest=10.0, latest=30.0,
+        audio_times=times, audio_score=noisy, search=3.0,
+        smooth=0.0, w_audio=1.0, w_video=0.0,
+    )
+    assert unsmoothed < 12.0

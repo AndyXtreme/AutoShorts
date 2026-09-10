@@ -2061,6 +2061,95 @@ def rank_scenes_with_ai(
             pass
 
 
+def snap_clip_end(
+    nominal_end: float,
+    earliest: float,
+    latest: float,
+    audio_times: np.ndarray,
+    audio_score: np.ndarray,
+    video_times: np.ndarray | None = None,
+    video_score: np.ndarray | None = None,
+    search: float | None = None,
+    smooth: float = 1.0,
+    w_audio: float = ACTION_W_AUDIO,
+    w_video: float = ACTION_W_VIDEO,
+) -> float:
+    """Move a clip's end to the calmest moment near where the budget ran out.
+
+    A length budget ends the clip wherever the seconds happen to run out, and
+    that lands mid-action as often as not: either the trick is not finished
+    and the clip stops halfway through it, or the next one has already started
+    and the clip carries a second of something the viewer will never see the
+    end of. Both read as a mistake.
+
+    The action profile already knows where the lulls are, so the end moves to
+    the quietest point within `search` seconds either way. `earliest` and
+    `latest` are hard limits - the minimum length the clip must still have, and
+    the maximum it may grow to (the platform's cap, or the end of the source).
+
+    Returns the chosen end time, or `nominal_end` when there is nothing to go on.
+    """
+    if search is None:
+        search = _get_env_float("CLIP_END_SNAP", 3.0)
+    if search <= 0:
+        return nominal_end
+
+    low = max(earliest, nominal_end - search)
+    high = min(latest, nominal_end + search)
+    if high <= low:
+        return nominal_end
+
+    if audio_times is None or audio_score is None or len(audio_times) < 2:
+        return nominal_end
+
+    # Take a slice wider than the search window so the smoothing below has
+    # real samples to work with at both edges instead of its own padding.
+    pad = 0.5 * smooth
+    mask = (audio_times >= low - pad) & (audio_times <= high + pad)
+    if not np.any(mask):
+        return nominal_end
+
+    times = audio_times[mask]
+    combined = w_audio * audio_score[mask].astype(float)
+
+    if video_times is not None and video_score is not None and len(video_times) > 1:
+        order = np.argsort(video_times)
+        combined = combined + w_video * np.interp(
+            times, video_times[order], video_score[order]
+        )
+
+    # The audio profile is sampled every few milliseconds and is noisy at that
+    # scale - two neighbouring samples routinely differ by more than a whole
+    # standard deviation. Picking the quietest single sample out of that finds
+    # noise, not a lull, and lands back on the frame the budget already chose.
+    # Averaging over about a second turns it into the envelope a viewer hears.
+    if len(times) > 2 and smooth > 0:
+        dt = float(np.median(np.diff(times)))
+        window = int(round(smooth / dt)) if dt > 0 else 0
+        if window > 1:
+            kernel = np.ones(window) / window
+            padded = np.pad(combined, window // 2, mode="edge")
+            combined = np.convolve(padded, kernel, mode="valid")[: len(combined)]
+
+    inner = (times >= low) & (times <= high)
+    if not np.any(inner):
+        return nominal_end
+    times = times[inner]
+    combined = combined[inner]
+
+    span = float(np.max(combined) - np.min(combined))
+    if span <= 0:
+        return nominal_end
+
+    # Anything close to the quietest point is just as good a place to cut, so
+    # prefer the one nearest the length that was asked for rather than
+    # drifting to the edge of the search window for a negligible gain.
+    tolerance = float(np.min(combined)) + 0.10 * span
+    candidates = np.flatnonzero(combined <= tolerance)
+    best = candidates[int(np.argmin(np.abs(times[candidates] - nominal_end)))]
+    return float(times[best])
+
+
 def _pick_window_length(effective_min: int, effective_max: int) -> int:
     """How long a window to cut out of a scene.
 
@@ -2097,7 +2186,7 @@ def clip_output_dir(output_dir: Path, video_file: Path) -> Path:
 def reset_clip_output_dir(output_dir: Path, video_file: Path) -> Path:
     """Clear a source video's output folder before a fresh run.
 
-    Clip names are deterministic (scene-0, scene-1, ...), so a rerun overwrites
+    Clip names are deterministic (scene-1, scene-2, ...), so a rerun overwrites
     what it produces - but only up to however many clips it makes this time. A
     run with a lower SCENE_LIMIT would leave the surplus clips of the previous
     run behind, indistinguishable from the current ones.
@@ -2402,10 +2491,10 @@ def process_video(video_file: Path, config: ProcessingConfig, output_dir: Path) 
             logging.info("AI analysis disabled or no scenes. Using heuristic ranking.")
         final_scene_list = sorted_processed_scene_list[:config.scene_limit]
 
-    # Number the clips in the order they occur in the source video. The ranking
-    # decided *which* scenes make the cut; keeping that order in the file names
-    # too means scene-0 can sit twenty minutes after scene-1, which is confusing
-    # when reviewing the output.
+    # Number the clips in the order they occur in the source video, from 1.
+    # The ranking decided *which* scenes make the cut; keeping that order in
+    # the file names too would mean scene-1 could sit twenty minutes after
+    # scene-2, which is confusing when reviewing the output.
     if final_scene_list:
         final_scene_list = sorted(final_scene_list, key=lambda s: s[0].get_seconds())
 
@@ -2414,7 +2503,7 @@ def process_video(video_file: Path, config: ProcessingConfig, output_dir: Path) 
     rendered_clips: List[Tuple[Path, str, Optional[dict]]] = []
 
     if final_scene_list:
-        for i, scene in enumerate(final_scene_list):
+        for i, scene in enumerate(final_scene_list, start=1):
             duration = math.floor(scene[1].get_seconds() - scene[0].get_seconds())
             # Ensure min <= max (scene might be shorter than min_short_length)
             effective_max = min(config.max_short_length, duration)
@@ -2449,12 +2538,42 @@ def process_video(video_file: Path, config: ProcessingConfig, output_dir: Path) 
             )
             short_length = max(float(window_length), short_length)
 
+            # The length budget ends the clip wherever the seconds run out.
+            # Move that to the nearest lull in the action instead: a scene
+            # shorter than the minimum length used to stop dead on the scene
+            # cut, halfway through the move being filmed, while a long one
+            # ran a second into whatever started next.
+            #
+            # Shortening is allowed only down to the minimum length, and
+            # lengthening only up to the maximum - the cap is there to keep
+            # Shorts under the platform's minute.
+            floor_end = best_start + min(float(config.min_short_length), short_length)
+            ceiling_end = min(
+                video_duration,
+                best_start + float(config.max_short_length),
+            )
+            snapped_end = snap_clip_end(
+                best_start + short_length,
+                earliest=floor_end,
+                latest=max(floor_end, ceiling_end),
+                audio_times=audio_times,
+                audio_score=audio_score,
+                video_times=video_times,
+                video_score=video_score,
+            )
+            snapped_end = max(floor_end, min(snapped_end, max(floor_end, ceiling_end)))
+            adjustment = snapped_end - (best_start + short_length)
+            short_length = snapped_end - best_start
+
             logging.info(
-                "Selected start %.2f for scene %d with window %.1fs (+%.1fs tail)",
+                "Selected start %.2f for scene %d with window %.1fs (+%.1fs tail, "
+                "%+.1fs to the nearest lull) -> %.1fs",
                 best_start,
                 i,
                 float(window_length),
-                short_length - window_length,
+                min(tail, max(0.0, short_length - window_length)),
+                adjustment,
+                short_length,
             )
 
             # Always MP4, never the source container. Matroska does not store a
@@ -2558,7 +2677,7 @@ def process_video(video_file: Path, config: ProcessingConfig, output_dir: Path) 
             config
         )
 
-        render_path = clip_output_dir(output_dir, video_file) / "scene-0.mp4"
+        render_path = clip_output_dir(output_dir, video_file) / "scene-1.mp4"
         render_video_gpu_isolated(
             params,
             render_path,
