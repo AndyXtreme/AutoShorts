@@ -334,7 +334,7 @@ places a window of the wanted length inside it. A window longer than its scene
 runs past the scene's end rather than being shortened back to it — only
 `MAX_SHORT_LENGTH` and the end of the source are hard limits.
 
-| `CLIP_END_SNAP` | Clip Length → Snap the end to a lull | `3.0` | How far the clip end may move to land on a quiet moment instead of wherever the length budget ran out. `0` disables it |
+| `CLIP_END_SNAP` | Clip Length → Snap the end to a lull | `6.0` | How far the clip end may move to land on a quiet moment instead of wherever the length budget ran out. Also the spread control — see below. `0` disables it |
 
 **Where a clip ends.** The window length is a budget, and a budget runs out
 mid-action as often as not — either the move being filmed is not finished and
@@ -352,6 +352,23 @@ takes a clip under the minimum or past the platform's minute.
 > This matters most for scenes shorter than `MIN_SHORT_LENGTH`, where the
 > window is forced to the whole scene and `RENDER_TAIL_BUFFER` is squeezed to
 > zero — exactly the case that needs the room.
+
+**`CLIP_END_SNAP` is also how much the lengths vary.** A small radius only
+reaches shallow dips close to the target, so every clip comes out the same
+length; a larger one insists on a real break in the action and lets the
+material decide. Measured on one 12-minute recording, the four clips of a run
+came out as:
+
+| `CLIP_END_SNAP` | lengths | spread |
+| ---: | :--- | ---: |
+| `3` | 37.7 / 38.1 / 38.3 / 36.5 | 1.8s |
+| `6` | 42.2 / 38.1 / 38.5 / 31.3 | 11.0s |
+| `10` | 27.6 / 44.5 / 45.5 / 29.0 | 18.0s |
+| `15` | 24.5 / 44.5 / 45.5 / 29.0 | 21.0s |
+
+Past about 15 seconds it saturates — there is no deeper lull left to find. The
+spread is reproducible either way: it comes from the action profile, not from
+a random draw, so the same recording and settings give the same lengths.
 
 ### Dead Air Removal
 

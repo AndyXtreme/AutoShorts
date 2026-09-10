@@ -142,12 +142,18 @@ def get_schema() -> List[EnvSection]:
                                    "right after speech and the clip stops on the exact frame - or mid-word"),
                 EnvField("MAX_SHORT_LENGTH", "Max short length (s)", "int_auto", 59, min_value=15, max_value=300,
                          help_text="Longest allowed clip. 59s keeps clips inside the YouTube Shorts limit"),
-                EnvField("CLIP_END_SNAP", "Snap the end to a lull (s)", "float", 3.0,
-                         min_value=0.0, max_value=15.0, step=0.5,
+                EnvField("CLIP_END_SNAP", "Snap the end to a lull (s)", "float", 6.0,
+                         min_value=0.0, max_value=25.0, step=0.5,
                          help_text="How far the clip end may move to land on a quiet moment instead of "
                                    "wherever the length budget ran out. Stops clips ending halfway through "
-                                   "a move, or a second into the next one. Never goes below the minimum "
-                                   "length or above the maximum. 0 disables it"),
+                                   "a move, or a second into the next one - and doubles as the spread "
+                                   "control: a small radius only finds shallow dips near the target, so "
+                                   "every clip comes out the same length, while a larger one insists on a "
+                                   "real break and lets the material decide. Measured on one recording: "
+                                   "3s gave lengths within 1.8s of each other, 6s within 11s, 10s within "
+                                   "18s. Never goes below the minimum length or above the maximum, and it "
+                                   "stays reproducible - the spread comes from the action profile, not from "
+                                   "chance. 0 disables it"),
                 EnvField("MAX_COMBINED_SCENE_LENGTH", "Max combined scene (s)", "int_auto", 0, min_value=30, max_value=600,
                          help_text="Max length when merging multiple scenes. Auto adjusts based on scene limit"),
             ],
