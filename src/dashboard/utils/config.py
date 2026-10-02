@@ -105,6 +105,12 @@ def get_schema() -> List[EnvSection]:
                          help_text="Silence kept at the very beginning and end of a clip. Cutting it flush "
                                    "makes the clip start and stop on the exact frame a word begins or ends, "
                                    "which reads as an abrupt cut"),
+                EnvField("SILENCE_PEAK_LEAD", "Keep before the highlight (s)", "float", 5.0,
+                         min_value=0.0, max_value=15.0, step=0.5,
+                         help_text="Seconds before a clip's action peak that are never cut. Tension before "
+                                   "a payoff is quiet and still, so it looks like dead air - without this "
+                                   "the successful jump was cut and the clip went from the failed tries "
+                                   "straight to the cheering. 0 disables it"),
                 EnvField("SILENCE_MIN_RESULT", "Min length after cutting (s)", "float", 8.0,
                          min_value=1.0, max_value=60.0, step=0.5,
                          help_text="Floor for the finished clip. Cutting stops here even if more dead air "

@@ -527,3 +527,10 @@ def test_an_unknown_preset_falls_back_to_the_default(clip_env):
     balanced = clip_env("balanced", (325.9, 347.2), profile=_attempts_then_payoff())
     unknown = clip_env("dramatic", (325.9, 347.2), profile=_attempts_then_payoff())
     assert unknown == balanced
+
+
+@pytest.mark.parametrize("preset", ["fixed", "balanced"])
+def test_the_plan_knows_where_the_payoff_is(clip_env, preset):
+    """Dead-air removal protects the run-up to this moment."""
+    plan = clip_env(preset, (325.9, 347.2), profile=_attempts_then_payoff())
+    assert 326.0 <= plan.peak <= 332.0

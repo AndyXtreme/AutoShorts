@@ -62,3 +62,42 @@ def test_motion_spans_are_clip_relative():
 
 def test_motion_spans_without_a_profile():
     assert sc._motion_spans(None, None, 0.0, 10.0, 1.0, 0.0) == []
+
+
+# --- the stretch before the highlight -------------------------------------
+# Measured on Haku Challenge #16, clip 2 (source 301.37s + 31.5s): what the
+# voice activity detector and the motion profile kept, in source seconds.
+_OFFSET, _DURATION = 301.37, 31.5
+_SPEECH = [(301.4, 304.6), (313.1, 315.3), (326.3, 332.7)]
+_MOTION = [(310.2, 323.1)]
+
+
+def _cuts(peak, lead=5.0):
+    rel = lambda spans: [(a - _OFFSET, b - _OFFSET) for a, b in spans]
+    build_up = sc._build_up_span(peak, _OFFSET, _DURATION, lead)
+    keep = sc._merge_spans(rel(_SPEECH) + rel(_MOTION) + build_up, join_below=0.5)
+    to_cut = sc._select_gaps_to_cut(sc._invert(keep, _DURATION), _DURATION, 1.0, 8.0)
+    return [(round(a + _OFFSET, 1), round(b + _OFFSET, 1))
+            for a, b in sc._keep_edges(to_cut, _DURATION, 0.8)]
+
+
+def test_without_a_peak_the_successful_attempt_is_cut():
+    """The defect: 323.1-326.3 is the jump that worked, and it went."""
+    assert (323.1, 326.3) in _cuts(peak=None)
+
+
+def test_the_stretch_before_the_peak_is_kept():
+    cuts = _cuts(peak=326.5)
+    assert not any(a < 326.3 and b > 323.1 for a, b in cuts)
+    # The wait between two failed attempts is still dead air.
+    assert (304.6, 310.2) in cuts
+
+
+def test_the_lead_can_be_switched_off():
+    assert _cuts(peak=326.5, lead=0.0) == _cuts(peak=None)
+
+
+def test_the_build_up_span_stays_inside_the_clip():
+    assert sc._build_up_span(2.0, 0.0, 30.0, 4.0) == [(0.0, 2.0)]
+    assert sc._build_up_span(50.0, 0.0, 30.0, 4.0) == [(26.0, 30.0)]
+    assert sc._build_up_span(-1.0, 0.0, 30.0, 4.0) == []

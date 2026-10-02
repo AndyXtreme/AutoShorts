@@ -167,6 +167,24 @@ def _motion_spans(
     return _merge_spans(spans, join_below=step)
 
 
+def _build_up_span(
+    peak: Optional[float], offset: float, duration: float, lead: float
+) -> List[Span]:
+    """The `lead` seconds before the clip's action peak, in clip-relative seconds.
+
+    Tension before a payoff is quiet and often still - nobody talks while
+    lining up a jump, and a camera following a bike through the air barely
+    changes - so neither speech nor motion keeps it. Measured on one clip:
+    the successful attempt, 323.1s-326.3s, was cut, and the clip went from
+    the failed tries straight to the cheering.
+    """
+    if peak is None or lead <= 0:
+        return []
+    end = min(duration, peak - offset)
+    start = max(0.0, end - lead)
+    return [(start, end)] if end > start else []
+
+
 def _invert(keep: Sequence[Span], duration: float) -> List[Span]:
     """The gaps between keep-spans, i.e. the candidates for removal."""
     gaps: List[Span] = []
@@ -269,8 +287,12 @@ def remove_dead_air(
     video_times: Optional[np.ndarray] = None,
     video_scores: Optional[np.ndarray] = None,
     min_clip_length: float = 0.0,
+    peak: Optional[float] = None,
 ) -> bool:
     """Cut silent, motionless stretches out of `clip_path` in place.
+
+    `peak` is the source time of the moment the clip was chosen for; the
+    stretch leading up to it is never cut (SILENCE_PEAK_LEAD seconds).
 
     Returns True if the clip was modified.
     """
@@ -307,7 +329,11 @@ def remove_dead_air(
             video_times, video_scores, source_offset, duration, motion_threshold, padding
         )
 
-        keep = _merge_spans(list(speech) + list(motion), join_below=min_gap * 0.5)
+        build_up = _build_up_span(
+            peak, source_offset, duration, _env_float("SILENCE_PEAK_LEAD", 5.0)
+        )
+
+        keep = _merge_spans(list(speech) + list(motion) + build_up, join_below=min_gap * 0.5)
         keep = [(max(0.0, s), min(duration, e)) for s, e in keep if e > 0 and s < duration]
 
         if not keep:

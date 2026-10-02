@@ -2240,6 +2240,75 @@ CLIP_LENGTH_PRESETS = {
 }
 
 
+def _action_grid(
+    lo: float,
+    count: int,
+    step: float,
+    smooth: float,
+    audio_times: np.ndarray,
+    audio_score: np.ndarray,
+    video_times: np.ndarray | None,
+    video_score: np.ndarray | None,
+    w_audio: float,
+    w_video: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """The combined action profile averaged into `count` slots of `step`
+    seconds from `lo`, smoothed over `smooth` seconds.
+
+    The audio profile is sampled every ~11ms and is noise at that scale;
+    averaged and smoothed it becomes the envelope a viewer hears.
+    """
+    grid = lo + step * np.arange(count)
+    mask = (audio_times >= lo) & (audio_times < lo + step * count)
+    times = audio_times[mask]
+    if video_times is not None and video_score is not None and len(video_times) > 1:
+        order = np.argsort(video_times)
+        values = w_audio * audio_score[mask].astype(float) + w_video * np.interp(
+            times, video_times[order], video_score[order]
+        )
+    else:
+        values = audio_score[mask].astype(float)
+    slot = np.clip(((times - lo) / step).astype(int), 0, count - 1)
+    totals = np.bincount(slot, values, minlength=count)
+    filled = np.bincount(slot, minlength=count)
+    profile = np.where(filled > 0, totals / np.maximum(filled, 1), 0.0)
+
+    window = int(round(smooth / step))
+    if window > 1:
+        padded = np.pad(profile, window // 2, mode="edge")
+        profile = np.convolve(padded, np.ones(window) / window, mode="valid")[:count]
+    return grid, profile
+
+
+def find_scene_peak(
+    start: float,
+    end: float,
+    audio_times: np.ndarray,
+    audio_score: np.ndarray,
+    video_times: np.ndarray | None = None,
+    video_score: np.ndarray | None = None,
+    smooth: float = 2.0,
+    step: float = 0.25,
+    w_audio: float = ACTION_W_AUDIO,
+    w_video: float = ACTION_W_VIDEO,
+) -> Optional[float]:
+    """When the action between `start` and `end` peaks, on the same smoothed
+    profile the dynamic presets anchor their window to. None without a profile."""
+    if audio_times is None or len(audio_times) < 2 or end - start < step:
+        return None
+    # Smooth over a margin either side so the edges see real material.
+    lo = max(0.0, start - smooth)
+    count = int((end + smooth - lo) / step)
+    grid, profile = _action_grid(
+        lo, count, step, smooth, audio_times, audio_score, video_times, video_score,
+        w_audio, w_video,
+    )
+    inside = np.flatnonzero((grid >= start) & (grid < end))
+    if inside.size == 0:
+        return None
+    return float(grid[inside[np.argmax(profile[inside])]])
+
+
 def plan_dynamic_window(
     scene_start: float,
     scene_end: float,
@@ -2283,28 +2352,12 @@ def plan_dynamic_window(
     if count < 2 or audio_times is None or len(audio_times) < 2:
         return None
 
-    # Average the profile into a coarse grid: the audio profile is sampled
-    # every ~11ms, and every candidate start and end is compared with every
-    # other, so it has to be coarse enough to keep that cheap.
-    grid = lo + step * np.arange(count)
-    mask = (audio_times >= lo) & (audio_times < lo + step * count)
-    times = audio_times[mask]
-    if video_times is not None and video_score is not None and len(video_times) > 1:
-        order = np.argsort(video_times)
-        values = w_audio * audio_score[mask].astype(float) + w_video * np.interp(
-            times, video_times[order], video_score[order]
-        )
-    else:
-        values = audio_score[mask].astype(float)
-    slot = np.clip(((times - lo) / step).astype(int), 0, count - 1)
-    totals = np.bincount(slot, values, minlength=count)
-    filled = np.bincount(slot, minlength=count)
-    profile = np.where(filled > 0, totals / np.maximum(filled, 1), 0.0)
-
-    window = int(round(smooth / step))
-    if window > 1:
-        padded = np.pad(profile, window // 2, mode="edge")
-        profile = np.convolve(padded, np.ones(window) / window, mode="valid")[:count]
+    # Every candidate start and end is compared with every other, so the
+    # grid has to be coarse enough to keep that cheap.
+    grid, profile = _action_grid(
+        lo, count, step, smooth, audio_times, audio_score, video_times, video_score,
+        w_audio, w_video,
+    )
 
     in_scene = np.flatnonzero((grid >= scene_start) & (grid < scene_end))
     if in_scene.size == 0:
@@ -2341,6 +2394,7 @@ class ClipPlan:
     length: float  # what gets rendered: the window plus tail and lull snap
     window: float
     adjustment: float  # how far the end moved to reach a lull
+    peak: Optional[float] = None  # source time of the scene's action peak
 
 
 def plan_clip(
@@ -2489,11 +2543,30 @@ def plan_clip(
         video_score=video_score,
     )
     snapped_end = max(floor_end, min(snapped_end, max(floor_end, ceiling_end)))
+
+    # The moment the scene was picked for. Dead-air removal keeps the seconds
+    # leading up to it: tension before a payoff is quiet and often still, so
+    # it reads as dead air - and was cut, taking the successful attempt out
+    # of a clip that had been placed specifically to show it.
+    peak = find_scene_peak(
+        max(scene_start, best_start),
+        min(scene_end, snapped_end),
+        audio_times,
+        audio_score,
+        video_times,
+        video_score,
+    )
+    if peak is None:
+        peak = find_scene_peak(
+            best_start, snapped_end, audio_times, audio_score, video_times, video_score
+        )
+
     return ClipPlan(
         start=best_start,
         length=snapped_end - best_start,
         window=window_length,
         adjustment=snapped_end - (best_start + short_length),
+        peak=peak,
     )
 
 
@@ -2925,6 +2998,7 @@ def process_video(video_file: Path, config: ProcessingConfig, output_dir: Path) 
                         video_times=video_times,
                         video_scores=video_score,
                         min_clip_length=_get_env_float("SILENCE_MIN_RESULT", 8.0),
+                        peak=plan.peak,
                     )
                 except Exception as e:
                     logging.warning(f"Silence cutting failed, keeping full clip: {e}")
