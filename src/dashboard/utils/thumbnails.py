@@ -75,9 +75,8 @@ def get_video_info(video_path: Path) -> VideoInfo:
 def list_videos(folder: Path, recursive: bool = False) -> List[VideoInfo]:
     """List videos in a folder.
 
-    Pass recursive=True for the output folder, where clips live in one
-    subfolder per source video. The input queue stays flat on purpose - its
-    .disabled subfolder holds videos that are deliberately excluded.
+    Pass recursive=True for a folder with one subfolder per source video,
+    such as the output folder. The input queue is read flat.
     """
     if not folder.exists():
         return []

@@ -70,6 +70,25 @@ def _build_env(overrides: dict) -> dict:
 UPLOAD_CHUNK = 8 * 1024 * 1024
 
 
+@st.dialog("Delete from gameplay/?")
+def _confirm_delete(paths: list) -> None:
+    """Delete recordings from the queue for good, after asking once.
+
+    Removing used to move the file into gameplay/.disabled/, which kept the
+    whole recording on disk and recreated that folder on every page load.
+    Clips already generated from a recording are not touched.
+    """
+    st.markdown("\n".join(f"- {p.name}" for p in paths))
+    st.caption("The files are deleted permanently. Clips already generated from them stay in generated/.")
+    yes, no = st.columns(2)
+    if yes.button("🗑️ Delete", type="primary", width="stretch"):
+        for path in paths:
+            Path(path).unlink(missing_ok=True)
+        st.rerun()
+    if no.button("Cancel", width="stretch"):
+        st.rerun()
+
+
 def _save_upload(upload, destination: Path) -> None:
     """Copy a browser upload into gameplay/, showing how far along it is.
 
@@ -133,8 +152,6 @@ def render() -> None:
 
         # Directories
         gameplay_dir = Path("gameplay")
-        disabled_dir = gameplay_dir / ".disabled"
-        disabled_dir.mkdir(parents=True, exist_ok=True)
 
         # Pick up files copied into gameplay/ from outside the UI. Streamlit only
         # redraws on interaction, so without this a file dropped into the mounted
@@ -145,9 +162,7 @@ def render() -> None:
 
         st.caption(f"📂 Watching `{gameplay_dir.resolve()}` - files copied in here show up automatically.")
 
-        # Get list of active and disabled videos
         gameplay_videos = list_videos(gameplay_dir)
-        disabled_videos_list = list_videos(disabled_dir)
 
         # Display current queue
         queue_container = st.container()
@@ -164,38 +179,12 @@ def render() -> None:
                     st.caption(f"**{vid.path.name}**")
                     st.caption(f"⏱️ {vid.duration:.0f}s | 💾 {vid.size_mb:.1f}MB")
                     
-                    # Remove button (move to disabled)
-                    if st.button("❌ Remove", key=f"disable_{vid.path.name}", help="Move to disabled (does not delete file)"):
-                        try:
-                             dest_path = disabled_dir / vid.path.name
-                             vid.path.rename(dest_path)
-                             st.toast(f"Moved '{vid.path.name}' to disabled")
-                             st.rerun()
-                        except Exception as e:
-                             st.error(f"Failed to move: {e}")
+                    if st.button("🗑️ Delete", key=f"delete_{vid.path.name}",
+                                 help="Delete this recording from gameplay/"):
+                        _confirm_delete([vid.path])
 
         else:
             st.info("The queue is empty. Add a video to start.")
-
-        # Display Disabled / Staged Videos
-        if disabled_videos_list:
-            with st.expander(f"🚫 Disabled / Staged Videos ({len(disabled_videos_list)})", expanded=False):
-                st.caption("Videos hered are available but won't be processed.")
-                d_cols = st.columns(3)
-                for idx, vid in enumerate(disabled_videos_list):
-                    col = d_cols[idx % 3]
-                    with col:
-                        # Optional: thumbnail for disabled too? Yes.
-                        # if vid.thumbnail: st.image(str(vid.thumbnail), width="stretch")
-                        st.text(vid.path.name)
-                        if st.button("➕ Add back", key=f"enable_{vid.path.name}"):
-                            try:
-                                dest_path = gameplay_dir / vid.path.name
-                                vid.path.rename(dest_path)
-                                st.toast(f"Added '{vid.path.name}' back to queue")
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Failed to enable: {e}")
 
         # Action Buttons
         st.divider()
@@ -238,31 +227,9 @@ def render() -> None:
                     st.rerun()
 
         with col_clear:
-            if st.button("🗑️ Clear Queue", type="secondary", width="stretch", disabled=not gameplay_videos):
-                cleaned_count = 0
-                moved_count = 0
-                for vid in gameplay_videos:
-                    try:
-                        if vid.path.is_symlink():
-                            vid.path.unlink()
-                            cleaned_count += 1
-                        else:
-                            # Move actual files to disabled instead of deleting!
-                            dest_path = disabled_dir / vid.path.name
-                            vid.path.rename(dest_path)
-                            moved_count += 1
-                    except Exception:
-                        pass
-                
-                msg = []
-                if cleaned_count > 0: msg.append(f"Removed {cleaned_count} links")
-                if moved_count > 0: msg.append(f"Moved {moved_count} files to disabled")
-                
-                if msg:
-                    st.success(", ".join(msg))
-                    st.rerun()
-                else:
-                    st.warning("Queue already empty")
+            if st.button("🗑️ Clear Queue", type="secondary", width="stretch", disabled=not gameplay_videos,
+                         help="Delete every recording in gameplay/"):
+                _confirm_delete([vid.path for vid in gameplay_videos])
 
         with col_rescan:
             # The folder is polled every few seconds anyway; this is for when you
@@ -307,7 +274,6 @@ def render() -> None:
                 "classic":      {"icon": "📝", "desc": "Clean white on black shadow", "color": "#FFFFFF", "bg": "#1a1a2e", "shadow": "#000", "font": "Arial"},
                 "minimalist":   {"icon": "🤍", "desc": "Subtle, semi-transparent", "color": "rgba(255,255,255,0.9)", "bg": "rgba(0,0,0,0.5)", "shadow": "none", "font": "Helvetica Neue, Arial"},
                 "default":      {"icon": "⬜", "desc": "Standard white text", "color": "#FFFFFF", "bg": "#1a1a2e", "shadow": "#000", "font": "Arial Black"},
-                "model":        {"icon": "🖤", "desc": "Clean minimal embedded", "color": "#FFFFFF", "bg": "#1a1a2e", "shadow": "none", "font": "Arial"},
             }
 
             tpl_names = list(PYCAPS_TEMPLATES.keys())
