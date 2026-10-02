@@ -695,6 +695,49 @@ def _caption_encoder(codec: Optional[str], quality: Optional[str]):
         video_writer.subprocess.Popen = original_popen
 
 
+class _Cv2WithFfmpegDecode:
+    """cv2 as movielite's VideoClip sees it, with VideoCapture routed through
+    video_io.open_capture and everything else (resize, cvtColor, the CAP_PROP
+    constants) passed through to the real module."""
+
+    def __init__(self, real) -> None:
+        self._real = real
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def VideoCapture(self, path, *args, **kwargs):  # noqa: N802 - cv2's name
+        from video_io import open_capture
+
+        return open_capture(path)
+
+
+@contextmanager
+def _caption_decoder():
+    """Let movielite read clips that OpenCV cannot decode.
+
+    movielite decodes the clip it puts captions on with cv2.VideoCapture, and
+    the FFmpeg inside the opencv-python wheel has no AV1 decoder. Every read
+    failed, movielite substituted black frames, and the result was a valid,
+    tiny AV1 file of captions on black. It used to work only because the
+    render wrote HEVC, which put a generation of another codec into every AV1
+    Short. Patched on the module movielite reads it from, for the duration of
+    the render.
+    """
+    try:
+        from movielite.video import video_clip
+    except ImportError:
+        yield
+        return
+
+    original = video_clip.cv2
+    video_clip.cv2 = _Cv2WithFfmpegDecode(original)
+    try:
+        yield
+    finally:
+        video_clip.cv2 = original
+
+
 def _run_pycaps_worker(video_path_str: str, srt_path_str: str, output_path_str: str, config: SubtitleConfig, word_lists: dict = None, output_codec: Optional[str] = None):
     """Worker function to run PyCaps in a separate process."""
     # Re-import necessary modules in the spawned process
@@ -1109,7 +1152,7 @@ def _run_pycaps_worker(video_path_str: str, srt_path_str: str, output_path_str: 
         # Build pipeline
         pipeline = builder.build()
 
-        with _caption_encoder(output_codec, quality_name) as swapped:
+        with _caption_encoder(output_codec, quality_name) as swapped, _caption_decoder():
             pipeline.run()
         if output_codec and not swapped:
             print(
@@ -1151,13 +1194,16 @@ def _apply_ffmpeg_subtitles(
     # Use the ASS file for subtitle burn-in
     subtitle_filter = f"ass='{ass_path}'"
     
+    # Kept in the clip's own codec, at the same quality setting the main
+    # caption renderer uses - this replaces that render, it is not an extra one.
+    from video_io import codec_of, video_encoder_args
+
+    quality = os.getenv("SUBTITLE_VIDEO_QUALITY", "high").strip().lower()
     cmd = [
         "ffmpeg", "-y",
         "-i", str(video_path),
         "-vf", subtitle_filter,
-        "-c:v", "hevc_nvenc",  # Use GPU encoding
-        "-preset", "slow",
-        "-cq", "23",
+        *video_encoder_args(codec_of(video_path), quality),
         "-c:a", "copy",
         str(output_path)
     ]

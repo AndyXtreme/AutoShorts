@@ -252,22 +252,21 @@ def _cut_with_ffmpeg(source: Path, keep: Sequence[Span], destination: Path) -> b
     streams = "".join(f"[v{i}][a{i}]" for i in range(len(keep)))
     filter_complex = ";".join(parts) + f";{streams}concat=n={len(keep)}:v=1:a=1[v][a]"
 
-    # Quality-targeted rather than a fixed bitrate. The clip arrives from the
-    # renderer at CQ 23 and leaves for the caption renderer, so this is the
-    # middle link of three encodes - a flat "-b:v 8M" both wasted bits on calm
-    # footage and starved busy footage, for no gain either way.
+    # Written back in the codec the clip is already in. This used to be HEVC,
+    # falling back to H.264, whatever came in - so an AV1 clip took a detour
+    # through another codec here before the caption stage turned it back.
+    # It is the middle link of three encodes, hence the intermediate quality;
+    # the fallback is the software encoder of the same codec, never another.
+    from video_io import INTERMEDIATE_QUALITY, codec_of, video_encoder_candidates
+
     ffmpeg = os.getenv("FFMPEG_BINARY", "ffmpeg")
-    encoders = (
-        ("hevc_nvenc", ["-preset", "p5", "-rc", "vbr", "-cq", "23", "-maxrate", "80M", "-bufsize", "100M"]),
-        ("libx264", ["-preset", "medium", "-crf", "20"]),
-    )
-    for encoder, quality_args in encoders:
+    for encoder_args in video_encoder_candidates(codec_of(source), INTERMEDIATE_QUALITY):
         command = [
             ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
             "-i", str(source),
             "-filter_complex", filter_complex,
             "-map", "[v]", "-map", "[a]",
-            "-c:v", encoder, *quality_args,
+            *encoder_args,
             "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "192k",
             str(destination),
@@ -275,7 +274,7 @@ def _cut_with_ffmpeg(source: Path, keep: Sequence[Span], destination: Path) -> b
         result = subprocess.run(command, capture_output=True, text=True)
         if result.returncode == 0 and destination.exists() and destination.stat().st_size > 0:
             return True
-        logging.warning(f"Silence cut with {encoder} failed: {result.stderr.strip()[:400]}")
+        logging.warning(f"Silence cut with {encoder_args[1]} failed: {result.stderr.strip()[:400]}")
         destination.unlink(missing_ok=True)
     return False
 

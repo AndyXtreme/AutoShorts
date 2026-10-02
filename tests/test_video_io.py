@@ -8,6 +8,7 @@ so both decisions live in video_io now and are pinned here.
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -159,3 +160,118 @@ def test_a_failed_re_encode_keeps_the_original(tmp_path, monkeypatch):
     assert video_io.match_output_codec(clip, source) is False
     assert clip.read_bytes() == b"the original"
     assert not list(tmp_path.glob("*.recode.*"))
+
+
+# --- every stage in the target codec --------------------------------------
+def test_candidates_keep_to_one_codec(monkeypatch):
+    """A failed NVENC falls back to software AV1, not to some other codec."""
+    monkeypatch.setattr(
+        video_io, "available_encoders",
+        lambda: frozenset({"av1_nvenc", "libsvtav1", "hevc_nvenc", "libx264"}),
+    )
+    names = [args[1] for args in video_io.video_encoder_candidates("av1")]
+    assert names == ["av1_nvenc", "libsvtav1"]
+
+
+def test_intermediate_quality_is_above_the_final_one(monkeypatch):
+    monkeypatch.setattr(video_io, "available_encoders", lambda: frozenset({"av1_nvenc"}))
+    final = video_io.video_encoder_args("av1")
+    middle = video_io.video_encoder_args("av1", video_io.INTERMEDIATE_QUALITY)
+    cq = lambda args: int(args[args.index("-cq") + 1])
+    assert cq(middle) < cq(final)
+
+
+def test_a_clip_is_written_back_in_its_own_codec(monkeypatch):
+    monkeypatch.setattr(video_io, "probe_video", lambda p: _probe("av1"))
+    assert video_io.codec_of("scene-1.mp4") == "av1"
+
+
+def test_no_stage_hardcodes_an_encoder():
+    """Every encode that ends up in a Short goes through video_io.
+
+    The render, dead-air removal and caption stages each used to name their
+    own encoder - HEVC or H.264 - so an AV1 recording went through two
+    generations of another codec on its way to an AV1 Short.
+    ai_providers is exempt: it writes 640px proxies for the AI ranking,
+    which are thrown away.
+    """
+    import re
+
+    src = Path(__file__).resolve().parents[1] / "src"
+    pattern = re.compile(r'"-c:v",\s*"(?!copy")[^"]+"')
+    offenders = [
+        f"{path.name}:{number}"
+        for path in src.rglob("*.py")
+        if path.name not in ("video_io.py", "ai_providers.py")
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if pattern.search(line)
+    ]
+    assert offenders == []
+
+
+# --- reading AV1 where OpenCV cannot --------------------------------------
+@pytest.fixture
+def av1_clip(tmp_path):
+    """A real two-second AV1 clip, or a skip where no encoder is around."""
+    import shutil
+    import subprocess
+
+    ffmpeg = video_io.ffmpeg_binary()
+    if not shutil.which(ffmpeg):
+        pytest.skip("no ffmpeg")
+    path = tmp_path / "scene-1.mp4"
+    for encoder in ("libsvtav1", "av1_nvenc", "libaom-av1"):
+        result = subprocess.run(
+            [ffmpeg, "-v", "error", "-y", "-f", "lavfi", "-i",
+             "testsrc2=size=320x240:rate=30:duration=2", "-pix_fmt", "yuv420p",
+             "-c:v", encoder, str(path)],
+            capture_output=True,
+        )
+        if result.returncode == 0 and path.exists():
+            return path
+    pytest.skip("no AV1 encoder in this ffmpeg")
+
+
+def test_av1_is_not_left_to_opencv(av1_clip):
+    assert isinstance(video_io.open_capture(av1_clip), video_io.FfmpegCapture)
+
+
+def test_hevc_stays_on_opencv(monkeypatch):
+    cv2 = pytest.importorskip("cv2")
+    monkeypatch.setattr(video_io, "probe_video", lambda p: _probe("hevc"))
+    assert isinstance(video_io.open_capture("clip.mp4"), cv2.VideoCapture)
+
+
+def test_the_capture_reads_and_seeks_like_opencv(av1_clip):
+    cv2 = pytest.importorskip("cv2")
+    cap = video_io.FfmpegCapture(av1_clip)
+    assert cap.isOpened()
+    assert (cap.get(cv2.CAP_PROP_FRAME_WIDTH), cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) == (320, 240)
+    assert cap.get(cv2.CAP_PROP_FPS) == pytest.approx(30.0)
+    assert cap.get(cv2.CAP_PROP_FRAME_COUNT) == 60
+
+    sequential = [cap.read()[1] for _ in range(11)]
+    assert sequential[0].shape == (240, 320, 3) and sequential[0].dtype == np.uint8
+    assert sequential[0].mean() > 20  # testsrc2 is colourful, not black
+
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 10)
+    ok, seeked = cap.read()
+    assert ok
+    assert np.array_equal(seeked, sequential[10])
+
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 60)
+    assert cap.read() == (False, None)
+    cap.release()
+
+
+def test_movielite_gets_pictures_from_an_av1_clip(av1_clip):
+    """The defect end to end: captions on black, because every read failed."""
+    pytest.importorskip("movielite")
+    from movielite.video.video_clip import VideoClip
+    import subtitle_generator
+
+    with subtitle_generator._caption_decoder():
+        clip = VideoClip(str(av1_clip))
+        frame = clip.get_frame(1.0)
+        clip.close()
+    assert frame.mean() > 20

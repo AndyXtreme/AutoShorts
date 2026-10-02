@@ -60,7 +60,14 @@ from ai_providers import (
     extract_candidate_clip,
 )
 from subtitle_generator import generate_subtitles, is_subtitles_enabled
-from video_io import match_output_codec, open_reader, probe_video
+from video_io import (
+    INTERMEDIATE_QUALITY,
+    match_output_codec,
+    open_reader,
+    probe_video,
+    target_codec_for,
+    video_encoder_args,
+)
 
 # Load environment variables from a .env file if present.
 load_dotenv()
@@ -1350,17 +1357,16 @@ def render_video_gpu(
     if has_valid_audio:
         cmd_ffmpeg.extend(["-i", str(temp_audio)])
 
+    # Written in the codec the finished Short will have. This was hardcoded
+    # HEVC, so an AV1 recording went AV1 -> HEVC -> AV1 and paid for a
+    # generation in a codec nobody asked for. It is not the last encode -
+    # dead-air removal and captions follow - hence the intermediate quality.
+    cmd_ffmpeg.extend(
+        video_encoder_args(target_codec_for(params.source_path), INTERMEDIATE_QUALITY)
+    )
     cmd_ffmpeg.extend([
-        "-c:v", "hevc_nvenc",  # Use hardware encoder
-        "-preset", "slow",
-        "-tune", "hq",
-        "-rc", "vbr",
-        "-cq", "23",  # Slightly increased CQ to reduce bitrate spikes
-        "-maxrate", "80M",  # Cap bitrate to prevent buffer bloat
-        "-bufsize", "100M",
         "-pix_fmt", "yuv420p",
         "-g", f"{int(fps * 2)}",
-        "-bf", "2",
     ])
 
     if has_valid_audio:
@@ -3176,10 +3182,9 @@ def process_video(video_file: Path, config: ProcessingConfig, output_dir: Path) 
                 except Exception as e:
                     logging.error(f"Error adding subtitles to {clip_path.name}: {e}")
     
-    # The caption stage renders through movielite, which hardcodes libx264, so
-    # everything arrives here as H.264 regardless of what went in. Put the
-    # clips back into the source's codec: an AV1 recording yields AV1 shorts,
-    # an HEVC one yields HEVC.
+    # Every stage writes the source's codec itself now, so this normally finds
+    # nothing to do. It stays as the safety net: an AV1 recording must yield
+    # AV1 shorts and an HEVC one HEVC, even if some stage fell back.
     for clip_path, _, _ in rendered_clips:
         try:
             match_output_codec(clip_path, video_file)

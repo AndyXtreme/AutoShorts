@@ -101,3 +101,43 @@ def test_the_build_up_span_stays_inside_the_clip():
     assert sc._build_up_span(2.0, 0.0, 30.0, 4.0) == [(0.0, 2.0)]
     assert sc._build_up_span(50.0, 0.0, 30.0, 4.0) == [(26.0, 30.0)]
     assert sc._build_up_span(-1.0, 0.0, 30.0, 4.0) == []
+
+
+# --- the codec it writes --------------------------------------------------
+def _fake_av1_clip(tmp_path, monkeypatch, fail=()):
+    import video_io
+
+    monkeypatch.delenv("OUTPUT_VIDEO_CODEC", raising=False)
+    monkeypatch.setattr(video_io, "probe_video", lambda p: video_io.VideoProbe(
+        codec="av1", width=1080, height=1920, fps=60.0, duration=30.0, frame_count=1800))
+    monkeypatch.setattr(video_io, "available_encoders",
+                        lambda: frozenset({"av1_nvenc", "libsvtav1", "hevc_nvenc", "libx264"}))
+    used = []
+
+    class Result:
+        def __init__(self, ok):
+            self.returncode, self.stderr = (0, "") if ok else (1, "failed")
+
+    def run(command, **kwargs):
+        encoder = command[command.index("-c:v") + 1]
+        used.append(encoder)
+        if encoder not in fail:
+            Path(command[-1]).write_bytes(b"video")
+        return Result(encoder not in fail)
+
+    monkeypatch.setattr(sc.subprocess, "run", run)
+    source = tmp_path / "scene-2.mp4"
+    source.write_bytes(b"video")
+    return source, tmp_path / "scene-2.cutting.mp4", used
+
+
+def test_an_av1_clip_is_cut_in_av1(tmp_path, monkeypatch):
+    source, destination, used = _fake_av1_clip(tmp_path, monkeypatch)
+    assert sc._cut_with_ffmpeg(source, [(0.0, 3.0), (8.0, 30.0)], destination)
+    assert used == ["av1_nvenc"]
+
+
+def test_a_failed_nvenc_falls_back_to_software_av1(tmp_path, monkeypatch):
+    source, destination, used = _fake_av1_clip(tmp_path, monkeypatch, fail=("av1_nvenc",))
+    assert sc._cut_with_ffmpeg(source, [(0.0, 3.0), (8.0, 30.0)], destination)
+    assert used == ["av1_nvenc", "libsvtav1"]

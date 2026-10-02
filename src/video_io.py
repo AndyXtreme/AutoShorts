@@ -168,8 +168,10 @@ class FfmpegVideoReader:
         width: Optional[int] = None,
         height: Optional[int] = None,
         device: str = "cpu",
+        pix_fmt: str = "rgb24",
     ) -> None:
         self._path = Path(path)
+        self._pix_fmt = pix_fmt
         self._probe = probe_video(self._path)
         self._width = int(width or self._probe.width)
         self._height = int(height or self._probe.height)
@@ -190,7 +192,7 @@ class FfmpegVideoReader:
         cmd += ["-i", str(self._path), "-map", "0:v:0"]
         if (self._width, self._height) != (self._probe.width, self._probe.height):
             cmd += ["-vf", f"scale={self._width}:{self._height}"]
-        cmd += ["-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
+        cmd += ["-f", "rawvideo", "-pix_fmt", self._pix_fmt, "-"]
         self._proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
         )
@@ -279,6 +281,81 @@ class FfmpegVideoReader:
             self._cursor += 1
             self._last = frame
         return self._last  # type: ignore[return-value]
+
+
+# What the FFmpeg bundled with the opencv-python wheel decodes - OpenCV 4.9,
+# avcodec 59, no AV1 decoder. movielite reads every frame of the caption
+# stage through it, and an AV1 clip came back as 1902 failed reads and a
+# black video with only the captions on it.
+OPENCV_CODECS = frozenset({"h264", "hevc", "mpeg4", "mpeg2video", "vp8", "vp9"})
+
+
+class FfmpegCapture:
+    """The part of cv2.VideoCapture that movielite uses, decoding through the
+    image's own FFmpeg instead of OpenCV's: open, read properties, seek by
+    frame index, read, release. Frames come back as BGR uint8 arrays, as
+    OpenCV would return them."""
+
+    def __init__(self, path) -> None:
+        import cv2
+
+        self._cv2 = cv2
+        self._probe = probe_video(path)
+        self._reader: Optional[FfmpegVideoReader] = None
+        if self._probe.width > 0 and self._probe.height > 0:
+            self._reader = FfmpegVideoReader(path, pix_fmt="bgr24")
+        self._next = 0
+
+    def isOpened(self) -> bool:
+        return self._reader is not None
+
+    def get(self, prop) -> float:
+        cv2 = self._cv2
+        values = {
+            cv2.CAP_PROP_FRAME_WIDTH: self._probe.width,
+            cv2.CAP_PROP_FRAME_HEIGHT: self._probe.height,
+            cv2.CAP_PROP_FPS: self._probe.fps,
+            cv2.CAP_PROP_FRAME_COUNT: self._probe.frame_count,
+            cv2.CAP_PROP_POS_FRAMES: self._next,
+        }
+        return float(values.get(prop, 0.0))
+
+    def set(self, prop, value) -> bool:
+        if prop == self._cv2.CAP_PROP_POS_FRAMES:
+            self._next = max(0, int(value))
+            return True
+        return False
+
+    def read(self):
+        if self._reader is None or self._next >= self._probe.frame_count:
+            return False, None
+        try:
+            frame = self._reader[self._next]
+        except RuntimeError:
+            return False, None
+        self._next += 1
+        return True, np.asarray(frame)
+
+    def release(self) -> None:
+        if self._reader is not None:
+            self._reader.close()
+
+
+def open_capture(path):
+    """cv2.VideoCapture for codecs OpenCV can decode, FfmpegCapture otherwise.
+
+    HEVC and H.264 stay on OpenCV, so their captioned output is exactly what
+    it was before AV1 needed a way through."""
+    import cv2
+
+    codec = probe_video(path).codec
+    if codec in OPENCV_CODECS:
+        return cv2.VideoCapture(str(path))
+    logging.info(
+        f"{Path(path).name} is {codec or 'an unknown codec'}, which OpenCV cannot "
+        "decode - reading it through FFmpeg."
+    )
+    return FfmpegCapture(path)
 
 
 def open_reader(
@@ -441,24 +518,51 @@ def _apply_quality(args: List[str], quality: Optional[str]) -> List[str]:
     return tuned
 
 
-def video_encoder_args(codec: str, quality: Optional[str] = None) -> List[str]:
-    """FFmpeg output arguments for `codec`, hardware where the build has it."""
+# Every stage before the last re-encodes a clip that gets encoded again, so
+# those stages run a step above the final quality: the extra generation should
+# cost as little as possible of what the viewer ends up seeing.
+INTERMEDIATE_QUALITY = "very_high"
+
+
+def video_encoder_candidates(codec: str, quality: Optional[str] = None) -> List[List[str]]:
+    """Output arguments for every encoder of `codec` this build has, best first.
+
+    For callers that can retry: NVENC can be listed by the build and still
+    fail at runtime (no GPU in the container, sessions exhausted), and the
+    software encoder of the same codec is the right fallback - not a
+    different codec.
+    """
     chain = _ENCODER_CHAINS.get(codec) or _ENCODER_CHAINS["hevc"]
     encoders = available_encoders()
-    for name, args in chain:
-        if not encoders or name in encoders:
-            return ["-c:v", name] + _apply_quality(args, quality)
+    found = [
+        ["-c:v", name] + _apply_quality(args, quality)
+        for name, args in chain
+        if not encoders or name in encoders
+    ]
+    if found:
+        return found
     name, args = chain[-1]
     logging.warning(f"No encoder for {codec} found in this FFmpeg build; trying {name}.")
-    return ["-c:v", name] + _apply_quality(args, quality)
+    return [["-c:v", name] + _apply_quality(args, quality)]
+
+
+def video_encoder_args(codec: str, quality: Optional[str] = None) -> List[str]:
+    """FFmpeg output arguments for `codec`, hardware where the build has it."""
+    return video_encoder_candidates(codec, quality)[0]
+
+
+def codec_of(path) -> str:
+    """The codec a stage that only sees a clip should write it back in: the
+    one it is already in, or OUTPUT_VIDEO_CODEC when that is forced."""
+    return target_codec(probe_video(path).codec)
 
 
 def match_output_codec(clip_path: Path, source_path: Path) -> bool:
     """Re-encode a finished clip so it matches the codec of its source.
 
-    The caption stage renders through movielite, which hardcodes libx264, so
-    the file that reaches the end of the pipeline is H.264 no matter what went
-    in. This is the one place that can put that right.
+    Every stage now writes the target codec itself, so this normally finds
+    nothing to do. It stays as the safety net for a stage that falls back -
+    or a new one that forgets - and would otherwise ship the wrong codec.
 
     Returns True when the clip was rewritten.
     """

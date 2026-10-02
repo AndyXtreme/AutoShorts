@@ -26,6 +26,8 @@ from typing import List, Optional, Tuple
 
 from dotenv import load_dotenv
 
+from video_io import codec_of, target_codec_for, video_encoder_args
+
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -700,8 +702,7 @@ def extend_video_with_tpad(
         "-filter_complex", filter_complex,
         "-map", "[vout]",
         "-map", "0:a?",  # Copy audio if present
-        "-c:v", "hevc_nvenc",
-        "-preset", "fast",
+        *video_encoder_args(codec_of(video_path)),
         "-c:a", "copy",
         str(output_path)
     ]
@@ -764,8 +765,7 @@ def rerender_video_longer(
         "-t", f"{target_duration:.3f}",
         "-i", str(render_meta.source_path),
         "-vf", f"{crop_filter},{scale_filter}",
-        "-c:v", "hevc_nvenc",
-        "-preset", "fast",
+        *video_encoder_args(target_codec_for(render_meta.source_path)),
         "-c:a", "aac",
         "-b:a", "192k",
         str(output_path)
