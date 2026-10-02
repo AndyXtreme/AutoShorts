@@ -119,9 +119,12 @@ RUN conda install -y -c conda-forge "ffmpeg=4.4.2" && conda clean -afy
 # makes AV1 unusable in both directions: decoding fails outright ("Cannot
 # determine format of input stream 0:0 after EOF") and there is no AV1 encoder
 # to write the finished shorts with. Pinned to a dated release rather than the
-# rolling "latest" tag so the image stays reproducible.
-ARG FFMPEG_BUILD=autobuild-2026-09-09-14-51
-ARG FFMPEG_ARCHIVE=ffmpeg-n9.0.1-27-g9b0578816c-linux64-gpl-9.0
+# rolling "latest" tag so the image stays reproducible - and to a month-end
+# one: BtbN deletes the daily autobuilds after about two weeks (the 2026-09-09
+# pin was gone by October and the build failed with a 404), while the last
+# build of each month is kept.
+ARG FFMPEG_BUILD=autobuild-2026-08-31-13-27
+ARG FFMPEG_ARCHIVE=ffmpeg-n9.0.1-11-ge47273f4d9-linux64-gpl-9.0
 RUN apt-get update && apt-get install -y --no-install-recommends curl xz-utils && \
     curl -fsSL -o /tmp/ffmpeg.tar.xz \
         "https://github.com/BtbN/FFmpeg-Builds/releases/download/${FFMPEG_BUILD}/${FFMPEG_ARCHIVE}.tar.xz" && \
