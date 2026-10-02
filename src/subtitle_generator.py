@@ -131,6 +131,8 @@ def transcribe_audio(video_path: Path, output_srt: Optional[Path] = None) -> Pat
                 condition_on_previous_text=False,
             )
 
+        result = _drop_stock_phrases(result)
+
         # Generate SRT content
         srt_content = _generate_srt(result)
 
@@ -442,6 +444,42 @@ def _transcribe_speech_regions(model, video_path: Path) -> Optional[dict]:
     text = " ".join(s.get("text", "").strip() for s in segments).strip()
     logging.info(f"Transcribed {len(regions)} speech region(s) separately.")
     return {"text": text, "segments": segments}
+
+
+# Lines Whisper invents on noise or silence because they close countless
+# subtitle files in its training data - broadcaster credits, mostly. Nobody
+# says them while playing. Measured on an eight-second piece of a German
+# recording: one second of engine noise came back as "Untertitel im Auftrag
+# des ZDF für funk, 2017". Each pattern needs a credit's shape - a sender with
+# a year, "Untertitel im Auftrag ..." - so a sentence that merely contains the
+# word "Untertitel" is left alone.
+_STOCK_PHRASES = tuple(re.compile(pattern, re.IGNORECASE) for pattern in (
+    r"\buntertitel(ung)?\s+(im auftrag|der|des|von|durch)\b",
+    r"amara\.org",
+    r"\b(zdf|ard|wdr|swr|ndr|mdr|rbb|funk)\b.{0,40}\b(19|20)\d{2}\b",
+    r"(\bcopyright\b|©).{0,40}\b(19|20)\d{2}\b",
+    r"\bsubtitles?\s+(by|from|provided)\b",
+    r"\btranscri(bed|ption)\s+by\b",
+))
+
+
+def _is_stock_phrase(text: str) -> bool:
+    return any(pattern.search(text) for pattern in _STOCK_PHRASES)
+
+
+def _drop_stock_phrases(result: dict) -> dict:
+    """Remove segments that are a subtitle credit Whisper made up, not speech."""
+    if os.getenv("WHISPER_DROP_STOCK_PHRASES", "true").lower() not in ("1", "true", "yes", "on"):
+        return result
+    segments = result.get("segments") or []
+    kept = [s for s in segments if not _is_stock_phrase(str(s.get("text", "")))]
+    if len(kept) == len(segments):
+        return result
+    for segment in segments:
+        if segment not in kept:
+            logging.info(f"Dropped a made-up subtitle credit: {str(segment.get('text', '')).strip()!r}")
+    text = " ".join(str(s.get("text", "")).strip() for s in kept).strip()
+    return {**result, "segments": kept, "text": text}
 
 
 def word_timings_path(srt_path: Path) -> Path:

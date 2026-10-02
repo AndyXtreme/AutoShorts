@@ -209,6 +209,11 @@ def get_schema() -> List[EnvSection]:
                          help_text="Remove words written in a script the chosen language does not use. Whisper "
                                    "falls back to Korean or CJK characters when it hallucinates on game noise; "
                                    "those can never be something you actually said"),
+                EnvField("WHISPER_DROP_STOCK_PHRASES", "Drop made-up subtitle credits", "bool", True,
+                         help_text="Remove lines like 'Untertitel im Auftrag des ZDF für funk, 2017' or "
+                                   "'Untertitel der Amara.org-Community'. Whisper invents them on noise and "
+                                   "silence because they end countless subtitle files it learned from. Only "
+                                   "the credit shape is matched, so ordinary sentences are never touched"),
                 EnvField("VAD_MAX_REGION", "Max speech region (s)", "float", 10.0,
                          min_value=2.0, max_value=30.0, step=1.0,
                          help_text="Stop merging speech regions at this length. Over roughly 15s Whisper starts "
