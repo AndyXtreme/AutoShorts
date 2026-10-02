@@ -181,6 +181,12 @@ def _is_debug_skip_analysis() -> bool:
     return os.getenv("DEBUG_SKIP_ANALYSIS", "").lower() in ("1", "true", "yes")
 
 
+def _is_debug_save_checkpoint() -> bool:
+    """Whether to keep the analysis next to the recording. Off by default:
+    it is a debugging aid, and gameplay/ is where the user keeps recordings."""
+    return os.getenv("DEBUG_SAVE_CHECKPOINT", "").lower() in ("1", "true", "yes")
+
+
 def _is_debug_skip_render() -> bool:
     """Check if we should skip rendering and use existing clips."""
     return os.getenv("DEBUG_SKIP_RENDER", "").lower() in ("1", "true", "yes")
@@ -2578,7 +2584,7 @@ def process_video(video_file: Path, config: ProcessingConfig, output_dir: Path) 
     # DEBUG: Save checkpoint before subtitle generation
     # This allows rerunning just the caption stage for debugging
     # ==========================================================================
-    if rendered_clips and not _is_debug_skip_analysis():
+    if rendered_clips and _is_debug_save_checkpoint() and not _is_debug_skip_analysis():
         try:
             _save_debug_checkpoint(
                 video_file=video_file,

@@ -286,8 +286,13 @@ def get_schema() -> List[EnvSection]:
         EnvSection(
             title="Decord & Debug",
             fields=[
+                EnvField("DEBUG_SAVE_CHECKPOINT", "Debug: keep analysis data", "bool", False,
+                         help_text="Save the scenes and action profiles of each run next to the recording "
+                                   "(<name>.debug_checkpoint.pkl). Needed for 'skip analysis', and for "
+                                   "replaying clip placement offline when tuning settings. Off keeps "
+                                   "gameplay/ free of anything but recordings"),
                 EnvField("DEBUG_SKIP_ANALYSIS", "Debug: skip analysis", "bool", False,
-                         help_text="Skip video analysis and use cached data (for testing)"),
+                         help_text="Skip video analysis and reuse the data saved by 'keep analysis data'"),
                 EnvField("DEBUG_SKIP_RENDER", "Debug: skip render", "bool", False,
                          help_text="Skip clip rendering (for testing subtitles only)"),
                 EnvField("DEBUG_RENDERED_CLIPS", "Debug: rendered clips", "text", "", multiline=True,

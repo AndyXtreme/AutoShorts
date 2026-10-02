@@ -534,3 +534,11 @@ def test_the_plan_knows_where_the_payoff_is(clip_env, preset):
     """Dead-air removal protects the run-up to this moment."""
     plan = clip_env(preset, (325.9, 347.2), profile=_attempts_then_payoff())
     assert 326.0 <= plan.peak <= 332.0
+
+
+def test_analysis_data_is_not_kept_by_default(monkeypatch):
+    """gameplay/ holds recordings; the debug checkpoint is opt-in."""
+    monkeypatch.delenv("DEBUG_SAVE_CHECKPOINT", raising=False)
+    assert shorts._is_debug_save_checkpoint() is False
+    monkeypatch.setenv("DEBUG_SAVE_CHECKPOINT", "true")
+    assert shorts._is_debug_save_checkpoint() is True
