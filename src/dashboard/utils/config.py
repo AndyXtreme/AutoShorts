@@ -133,10 +133,11 @@ def get_schema() -> List[EnvSection]:
                                    "the action profile and may run past its end. 0 goes back to using the "
                                    "scene's own length, which makes every clip a different length and puts one "
                                    "clip per run at the maximum"),
-                EnvField("CLIP_LENGTH_PRESET", "Length preset", "select", "fixed",
+                EnvField("CLIP_LENGTH_PRESET", "Length preset", "select", "balanced",
                          options=["fixed", "balanced", "loose"],
                          help_text="fixed: every clip runs the target length and starts inside its scene - "
-                                   "what earlier runs used. balanced: the clip is built around the scene's "
+                                   "what runs before October 2026 used, so pick it to reproduce one of "
+                                   "those. balanced (default): the clip is built around the scene's "
                                    "peak and may start before the scene, so the attempts leading up to a "
                                    "payoff are kept, and it runs longer than the target only for clearly "
                                    "active material or shorter for clearly dead air (measured on ten "

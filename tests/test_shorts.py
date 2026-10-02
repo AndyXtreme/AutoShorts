@@ -515,7 +515,15 @@ def test_dynamic_presets_are_reproducible(clip_env):
     assert first == second
 
 
-def test_an_unknown_preset_falls_back_to_fixed(clip_env):
-    fixed = clip_env("fixed", (325.9, 347.2), profile=_attempts_then_payoff())
+def test_balanced_is_the_default(clip_env, monkeypatch):
+    balanced = clip_env("balanced", (325.9, 347.2), profile=_attempts_then_payoff())
+    monkeypatch.delenv("CLIP_LENGTH_PRESET")
+    times, scores = _attempts_then_payoff()
+    unset = shorts.plan_clip(325.9, 347.2, 0.0, 600.0, 600.0, 15, 59, times, scores)
+    assert unset == balanced
+
+
+def test_an_unknown_preset_falls_back_to_the_default(clip_env):
+    balanced = clip_env("balanced", (325.9, 347.2), profile=_attempts_then_payoff())
     unknown = clip_env("dramatic", (325.9, 347.2), profile=_attempts_then_payoff())
-    assert unknown == fixed
+    assert unknown == balanced

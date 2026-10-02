@@ -2366,10 +2366,10 @@ def plan_clip(
     tail = max(0.0, _get_env_float("RENDER_TAIL_BUFFER", 1.5))
     target = _get_env_int("TARGET_SHORT_LENGTH", 35)
 
-    preset = os.getenv("CLIP_LENGTH_PRESET", "fixed").strip().lower()
+    preset = os.getenv("CLIP_LENGTH_PRESET", "balanced").strip().lower()
     if preset not in CLIP_LENGTH_PRESETS and preset != "fixed":
-        logging.warning(f"Unknown CLIP_LENGTH_PRESET={preset!r}; using 'fixed'.")
-        preset = "fixed"
+        logging.warning(f"Unknown CLIP_LENGTH_PRESET={preset!r}; using 'balanced'.")
+        preset = "balanced"
 
     if preset != "fixed" and target > 0:
         extend_cost, shrink_cost = CLIP_LENGTH_PRESETS[preset]
