@@ -2222,6 +2222,281 @@ def _pick_window_length(effective_min: int, effective_max: int) -> int:
     return effective_max
 
 
+# What a second of clip has to be worth before a dynamic preset strays from
+# the target length: (extend, shrink), in units of the z-scored action profile.
+# Material is added beyond the target only while it averages more than
+# `extend` above the recording's mean, and cut below it only while it averages
+# under `-shrink`; anything in between leaves the target alone.
+#
+# Measured on 40 clips from ten recordings at a 30s target, a 45s cap, a 6s
+# lull snap and motion weighted 0.8 against audio 0.2: balanced kept 22 of
+# them within 30-35s and let 15 run longer (median 33s, fixed gives 32s);
+# loose moved the median to 35s with 14 between 40 and 45s. 0.20 put half
+# of them at 40s or more, which is a longer target rather than a preset.
+# The units follow the action weights, so changing those shifts the presets.
+CLIP_LENGTH_PRESETS = {
+    "balanced": (0.40, 0.40),
+    "loose": (0.30, 0.40),
+}
+
+
+def plan_dynamic_window(
+    scene_start: float,
+    scene_end: float,
+    earliest: float,
+    latest: float,
+    target: float,
+    min_length: float,
+    max_length: float,
+    audio_times: np.ndarray,
+    audio_score: np.ndarray,
+    video_times: np.ndarray | None = None,
+    video_score: np.ndarray | None = None,
+    extend_cost: float = 0.40,
+    shrink_cost: float = 0.40,
+    smooth: float = 2.0,
+    step: float = 0.25,
+    w_audio: float = ACTION_W_AUDIO,
+    w_video: float = ACTION_W_VIDEO,
+) -> Optional[Tuple[float, float]]:
+    """Place a clip around the scene's peak and let the material set its length.
+
+    The fixed placement searches from the scene's first frame onwards, so a
+    clip can never start before its scene. Scene detection cuts on the
+    picture, and the picture often changes exactly at the payoff - the level
+    clears, the checkpoint loads - which put the payoff in the clip's first
+    second and left the attempts leading up to it in the scene before:
+    measured on one recording, the clip opened on the success at 325.9s
+    while the failed attempts ran from about 300s.
+
+    Here the scene only supplies its peak, and the window may sit anywhere
+    that contains it, in either direction, between `earliest` and `latest`.
+    Its length starts at `target` and moves only when the material pays for
+    it - see CLIP_LENGTH_PRESETS for the exchange rate.
+
+    Returns (start, window_length), or None when nothing of the scene is
+    left between the limits.
+    """
+    lo = max(earliest, scene_start - max_length, 0.0)
+    hi = min(latest, scene_end + max_length)
+    count = int((hi - lo) / step)
+    if count < 2 or audio_times is None or len(audio_times) < 2:
+        return None
+
+    # Average the profile into a coarse grid: the audio profile is sampled
+    # every ~11ms, and every candidate start and end is compared with every
+    # other, so it has to be coarse enough to keep that cheap.
+    grid = lo + step * np.arange(count)
+    mask = (audio_times >= lo) & (audio_times < lo + step * count)
+    times = audio_times[mask]
+    if video_times is not None and video_score is not None and len(video_times) > 1:
+        order = np.argsort(video_times)
+        values = w_audio * audio_score[mask].astype(float) + w_video * np.interp(
+            times, video_times[order], video_score[order]
+        )
+    else:
+        values = audio_score[mask].astype(float)
+    slot = np.clip(((times - lo) / step).astype(int), 0, count - 1)
+    totals = np.bincount(slot, values, minlength=count)
+    filled = np.bincount(slot, minlength=count)
+    profile = np.where(filled > 0, totals / np.maximum(filled, 1), 0.0)
+
+    window = int(round(smooth / step))
+    if window > 1:
+        padded = np.pad(profile, window // 2, mode="edge")
+        profile = np.convolve(padded, np.ones(window) / window, mode="valid")[:count]
+
+    in_scene = np.flatnonzero((grid >= scene_start) & (grid < scene_end))
+    if in_scene.size == 0:
+        return None
+    peak = int(in_scene[np.argmax(profile[in_scene])])
+
+    # Every window that still contains the peak: starts at or before it, ends
+    # after it, no longer than allowed. Restricting both sides to max_length
+    # around the peak keeps this a small table even for a ten-minute scene.
+    reach = int(max_length / step)
+    starts = np.arange(max(0, peak - reach), peak + 1)[:, None]
+    ends = np.arange(peak + 1, min(count, peak + reach) + 1)[None, :]
+    lengths = (ends - starts) * step
+
+    cumulative = np.concatenate(([0.0], np.cumsum(profile))) * step
+    score = (
+        cumulative[ends] - cumulative[starts]
+        - extend_cost * np.maximum(0.0, lengths - target)
+        - shrink_cost * np.maximum(0.0, target - lengths)
+    )
+    shortest = min(min_length, step * count)
+    score = np.where((lengths >= shortest - 1e-9) & (lengths <= max_length + 1e-9), score, -np.inf)
+    if not np.isfinite(score).any():
+        return None
+
+    # argmax takes the first of equal scores, so a rerun lands on the same window.
+    row, col = np.unravel_index(int(np.argmax(score)), score.shape)
+    return float(grid[0] + starts[row, 0] * step), float(lengths[row, col])
+
+
+@dataclass(frozen=True)
+class ClipPlan:
+    start: float
+    length: float  # what gets rendered: the window plus tail and lull snap
+    window: float
+    adjustment: float  # how far the end moved to reach a lull
+
+
+def plan_clip(
+    scene_start: float,
+    scene_end: float,
+    previous_end: float,
+    next_start: float,
+    video_duration: float,
+    min_length: int,
+    max_length: int,
+    audio_times: np.ndarray,
+    audio_score: np.ndarray,
+    video_times: np.ndarray | None = None,
+    video_score: np.ndarray | None = None,
+) -> Optional[ClipPlan]:
+    """Decide which stretch of the source one selected scene becomes.
+
+    `previous_end` is where the previous clip's footage ended and
+    `next_start` where the next selected scene begins. Returns None when the
+    scene has nothing left to give - the previous clip already covers it.
+    """
+    room = max(0.0, video_duration - scene_start)
+    tail = max(0.0, _get_env_float("RENDER_TAIL_BUFFER", 1.5))
+    target = _get_env_int("TARGET_SHORT_LENGTH", 35)
+
+    preset = os.getenv("CLIP_LENGTH_PRESET", "fixed").strip().lower()
+    if preset not in CLIP_LENGTH_PRESETS and preset != "fixed":
+        logging.warning(f"Unknown CLIP_LENGTH_PRESET={preset!r}; using 'fixed'.")
+        preset = "fixed"
+
+    if preset != "fixed" and target > 0:
+        extend_cost, shrink_cost = CLIP_LENGTH_PRESETS[preset]
+        cap = float(min(max_length, max(min_length, _get_env_int("DYNAMIC_MAX_LENGTH", 45))))
+        # Stay out of the next selected scene, tail included, so that scene
+        # keeps its own peak instead of finding it already used up.
+        limit = min(video_duration, max(next_start, scene_end))
+        planned = plan_dynamic_window(
+            scene_start,
+            scene_end,
+            earliest=previous_end,
+            latest=limit - tail if limit < video_duration else limit,
+            target=float(min(target, cap - tail)),
+            min_length=float(min(min_length, max(1.0, cap - tail))),
+            max_length=max(1.0, cap - tail),
+            audio_times=audio_times,
+            audio_score=audio_score,
+            video_times=video_times,
+            video_score=video_score,
+            extend_cost=extend_cost,
+            shrink_cost=shrink_cost,
+        )
+        if planned is None:
+            return None
+        best_start, window_length = planned
+        short_length = min(window_length + tail, max(0.0, limit - best_start))
+        ceiling_end = min(limit, best_start + cap)
+    else:
+        duration = math.floor(scene_end - scene_start)
+        # How long the clip should be. Scene detection cuts on what the
+        # picture does, which in continuous gameplay is nowhere near where
+        # a move starts or stops, so a scene says *where* to look, not how
+        # much to take. Letting it decide the length made every clip a
+        # different length for no reason the viewer can see, and reliably
+        # produced one clip at the 59s ceiling per run: scenes are ranked
+        # by total action, so a long scene accumulates its way into the
+        # selection and then hands over its whole length.
+        #
+        # TARGET_SHORT_LENGTH=0 restores the old behaviour.
+        budget = min(target, max_length) if target > 0 else min(max_length, duration)
+
+        # Ensure min <= max (there may be less material left than asked for)
+        effective_max = max(1, min(budget, int(room)))
+        effective_min = min(min_length, effective_max)
+
+        # A tail is rendered after the action window so the clip has
+        # material to fade out on; without it the boundary lands during or
+        # right after speech and the clip stops on the exact frame a
+        # sentence ends - or mid-word.
+        #
+        # It only has to be reserved from the budget when the platform
+        # limit is what caps the window. When the *scene* is the cap the
+        # tail costs nothing, because it is explicitly allowed to run past
+        # the scene boundary (see below) - reserving it there took the
+        # seconds twice and left a scene at the minimum length with no tail
+        # at all, which is exactly the case most likely to end abruptly.
+        capped_by_platform = effective_max >= max_length
+        reserve = min(tail, max(0.0, effective_max - effective_min)) if capped_by_platform else 0.0
+
+        window_length = float(_pick_window_length(effective_min, int(effective_max - reserve)))
+
+        # A window longer than its scene has to be allowed to run past the
+        # scene's end - otherwise the clip is silently shortened back to
+        # the scene, which is the whole thing this is meant to stop. The
+        # search region grows by exactly the overrun, which leaves the
+        # start pinned to the scene and the surplus hanging off the end.
+        overrun = max(0.0, window_length - (scene_end - scene_start))
+        region_start = max(scene_start, previous_end)
+        region_end = min(video_duration, scene_end + overrun)
+        if region_start >= region_end:
+            return None
+
+        search_region = (
+            (_SecondsTime(region_start), _SecondsTime(region_end))
+            if (overrun > 0 or region_start > scene_start)
+            else (_SecondsTime(scene_start), _SecondsTime(scene_end))
+        )
+        best_start = best_action_window_start(
+            search_region,
+            window_length,
+            audio_times,
+            audio_score,
+            video_times,
+            video_score,
+        )
+        best_start = max(best_start, region_start)
+
+        # The tail may cross the scene boundary - only the end of the source
+        # video is a hard limit. Scenes often end exactly where the speaker
+        # stops, which is precisely the abrupt ending this is meant to avoid,
+        # so clamping to the scene would leave the tail at zero.
+        short_length = min(
+            window_length + tail,
+            float(max_length),
+            max(0.0, video_duration - best_start),
+        )
+        short_length = max(window_length, short_length)
+        ceiling_end = min(video_duration, best_start + float(max_length))
+
+    # The length budget ends the clip wherever the seconds run out.
+    # Move that to the nearest lull in the action instead: a scene
+    # shorter than the minimum length used to stop dead on the scene
+    # cut, halfway through the move being filmed, while a long one
+    # ran a second into whatever started next.
+    #
+    # Shortening is allowed only down to the minimum length, and
+    # lengthening only up to the maximum - the cap is there to keep
+    # Shorts under the platform's minute.
+    floor_end = best_start + min(float(min_length), short_length)
+    snapped_end = snap_clip_end(
+        best_start + short_length,
+        earliest=floor_end,
+        latest=max(floor_end, ceiling_end),
+        audio_times=audio_times,
+        audio_score=audio_score,
+        video_times=video_times,
+        video_score=video_score,
+    )
+    snapped_end = max(floor_end, min(snapped_end, max(floor_end, ceiling_end)))
+    return ClipPlan(
+        start=best_start,
+        length=snapped_end - best_start,
+        window=window_length,
+        adjustment=snapped_end - (best_start + short_length),
+    )
+
+
 def clip_output_dir(output_dir: Path, video_file: Path) -> Path:
     """Folder that holds every clip produced from one source video.
 
@@ -2563,55 +2838,26 @@ def process_video(video_file: Path, config: ProcessingConfig, output_dir: Path) 
         for i, scene in enumerate(final_scene_list, start=1):
             scene_start = float(scene[0].get_seconds())
             scene_end = float(scene[1].get_seconds())
-            duration = math.floor(scene_end - scene_start)
-            room = max(0.0, video_duration - scene_start)
-
-            # How long the clip should be. Scene detection cuts on what the
-            # picture does, which in continuous gameplay is nowhere near where
-            # a move starts or stops, so a scene says *where* to look, not how
-            # much to take. Letting it decide the length made every clip a
-            # different length for no reason the viewer can see, and reliably
-            # produced one clip at the 59s ceiling per run: scenes are ranked
-            # by total action, so a long scene accumulates its way into the
-            # selection and then hands over its whole length.
-            #
-            # TARGET_SHORT_LENGTH=0 restores the old behaviour.
-            target = _get_env_int("TARGET_SHORT_LENGTH", 35)
-            budget = min(target, config.max_short_length) if target > 0 else min(
-                config.max_short_length, duration
+            next_start = (
+                float(final_scene_list[i][0].get_seconds())
+                if i < len(final_scene_list)
+                else video_duration
             )
 
-            # Ensure min <= max (there may be less material left than asked for)
-            effective_max = max(1, min(budget, int(room)))
-            effective_min = min(config.min_short_length, effective_max)
-
-            # A tail is rendered after the action window so the clip has
-            # material to fade out on; without it the boundary lands during or
-            # right after speech and the clip stops on the exact frame a
-            # sentence ends - or mid-word.
-            #
-            # It only has to be reserved from the budget when the platform
-            # limit is what caps the window. When the *scene* is the cap the
-            # tail costs nothing, because it is explicitly allowed to run past
-            # the scene boundary (see below) - reserving it there took the
-            # seconds twice and left a scene at the minimum length with no tail
-            # at all, which is exactly the case most likely to end abruptly.
-            tail = max(0.0, _get_env_float("RENDER_TAIL_BUFFER", 1.5))
-            capped_by_platform = effective_max >= config.max_short_length
-            reserve = min(tail, max(0.0, effective_max - effective_min)) if capped_by_platform else 0.0
-
-            window_length = _pick_window_length(effective_min, int(effective_max - reserve))
-
-            # A window longer than its scene has to be allowed to run past the
-            # scene's end - otherwise the clip is silently shortened back to
-            # the scene, which is the whole thing this is meant to stop. The
-            # search region grows by exactly the overrun, which leaves the
-            # start pinned to the scene and the surplus hanging off the end.
-            overrun = max(0.0, float(window_length) - (scene_end - scene_start))
-            region_start = max(scene_start, previous_end)
-            region_end = min(video_duration, scene_end + overrun)
-
-            if region_start >= region_end:
+            plan = plan_clip(
+                scene_start,
+                scene_end,
+                previous_end=previous_end,
+                next_start=next_start,
+                video_duration=video_duration,
+                min_length=config.min_short_length,
+                max_length=config.max_short_length,
+                audio_times=audio_times,
+                audio_score=audio_score,
+                video_times=video_times,
+                video_score=video_score,
+            )
+            if plan is None:
                 logging.info(
                     "Skipping scene %d at %.2f: the previous clip already covers it.",
                     i,
@@ -2619,59 +2865,8 @@ def process_video(video_file: Path, config: ProcessingConfig, output_dir: Path) 
                 )
                 continue
 
-            search_region = (
-                (_SecondsTime(region_start), _SecondsTime(region_end))
-                if (overrun > 0 or region_start > scene_start)
-                else scene
-            )
-
-            best_start = best_action_window_start(
-                search_region,
-                float(window_length),
-                audio_times,
-                audio_score,
-                video_times,
-                video_score,
-            )
-            best_start = max(best_start, region_start)
-
-            # The tail may cross the scene boundary - only the end of the source
-            # video is a hard limit. Scenes often end exactly where the speaker
-            # stops, which is precisely the abrupt ending this is meant to avoid,
-            # so clamping to the scene would leave the tail at zero.
-            short_length = min(
-                window_length + tail,
-                float(config.max_short_length),
-                max(0.0, video_duration - best_start),
-            )
-            short_length = max(float(window_length), short_length)
-
-            # The length budget ends the clip wherever the seconds run out.
-            # Move that to the nearest lull in the action instead: a scene
-            # shorter than the minimum length used to stop dead on the scene
-            # cut, halfway through the move being filmed, while a long one
-            # ran a second into whatever started next.
-            #
-            # Shortening is allowed only down to the minimum length, and
-            # lengthening only up to the maximum - the cap is there to keep
-            # Shorts under the platform's minute.
-            floor_end = best_start + min(float(config.min_short_length), short_length)
-            ceiling_end = min(
-                video_duration,
-                best_start + float(config.max_short_length),
-            )
-            snapped_end = snap_clip_end(
-                best_start + short_length,
-                earliest=floor_end,
-                latest=max(floor_end, ceiling_end),
-                audio_times=audio_times,
-                audio_score=audio_score,
-                video_times=video_times,
-                video_score=video_score,
-            )
-            snapped_end = max(floor_end, min(snapped_end, max(floor_end, ceiling_end)))
-            adjustment = snapped_end - (best_start + short_length)
-            short_length = snapped_end - best_start
+            best_start = plan.start
+            short_length = plan.length
             previous_end = best_start + short_length
 
             logging.info(
@@ -2679,9 +2874,9 @@ def process_video(video_file: Path, config: ProcessingConfig, output_dir: Path) 
                 "%+.1fs to the nearest lull) -> %.1fs",
                 best_start,
                 i,
-                float(window_length),
-                min(tail, max(0.0, short_length - window_length)),
-                adjustment,
+                plan.window,
+                min(max(0.0, _get_env_float("RENDER_TAIL_BUFFER", 1.5)), max(0.0, short_length - plan.window)),
+                plan.adjustment,
                 short_length,
             )
 

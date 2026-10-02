@@ -133,6 +133,22 @@ def get_schema() -> List[EnvSection]:
                                    "the action profile and may run past its end. 0 goes back to using the "
                                    "scene's own length, which makes every clip a different length and puts one "
                                    "clip per run at the maximum"),
+                EnvField("CLIP_LENGTH_PRESET", "Length preset", "select", "fixed",
+                         options=["fixed", "balanced", "loose"],
+                         help_text="fixed: every clip runs the target length and starts inside its scene - "
+                                   "what earlier runs used. balanced: the clip is built around the scene's "
+                                   "peak and may start before the scene, so the attempts leading up to a "
+                                   "payoff are kept, and it runs longer than the target only for clearly "
+                                   "active material or shorter for clearly dead air (measured on ten "
+                                   "recordings: median 33s, 15 of 40 clips longer than 35s). loose: the "
+                                   "same, but gives in to extra material more readily (median 35s, 14 of "
+                                   "40 between 40 and 45s). All three are reproducible. Measured with "
+                                   "motion weighted 0.8 - other weights shift the dynamic presets"),
+                EnvField("DYNAMIC_MAX_LENGTH", "Longest dynamic clip (s)", "int", 45,
+                         min_value=15, max_value=120,
+                         help_text="Upper limit for balanced and loose, tail included - never above the "
+                                   "max short length. At 59 instead of 45, balanced let 4 of 40 clips run "
+                                   "the full minute"),
                 EnvField("MIN_SHORT_LENGTH", "Min short length (s)", "int_auto", 15, min_value=5, max_value=120,
                          help_text="Shortest allowed clip. Auto mode picks based on video length"),
                 EnvField("RENDER_TAIL_BUFFER", "Tail after the window (s)", "float", 1.5,

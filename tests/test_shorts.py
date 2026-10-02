@@ -418,3 +418,104 @@ def test_clips_from_adjacent_scenes_do_not_overlap():
 
     for (_, earlier_end), (later_start, _) in zip(spans, spans[1:]):
         assert later_start >= earlier_end
+
+
+# --- the length presets ---------------------------------------------------
+@pytest.fixture
+def clip_env(monkeypatch):
+    monkeypatch.setenv("TARGET_SHORT_LENGTH", "30")
+    monkeypatch.setenv("RENDER_TAIL_BUFFER", "1.5")
+    monkeypatch.setenv("CLIP_END_SNAP", "6.0")
+    monkeypatch.setenv("DYNAMIC_MAX_LENGTH", "45")
+    monkeypatch.delenv("CLIP_LENGTH_MODE", raising=False)
+
+    def plan(preset, scene, previous_end=0.0, next_start=600.0, profile=None):
+        monkeypatch.setenv("CLIP_LENGTH_PRESET", preset)
+        times, scores = profile
+        return shorts.plan_clip(
+            scene[0], scene[1], previous_end, next_start, 600.0, 15, 59, times, scores
+        )
+
+    return plan
+
+
+def _attempts_then_payoff():
+    """Failed attempts from 302s, the payoff at 326s right on a scene cut, then quiet.
+
+    Shaped after the recording the dynamic presets were built for, where the
+    scene detector cut exactly at the payoff.
+    """
+    times = np.arange(0.0, 600.0, 0.05)
+    scores = np.full_like(times, -0.3)
+    for start in (302.0, 306.0, 310.0, 314.0, 318.0, 322.0):
+        scores[(times >= start) & (times < start + 2.5)] = 0.8
+    scores[(times >= 326.0) & (times < 332.0)] = 3.0
+    return times, scores
+
+
+def test_fixed_starts_on_the_scene_cut_and_loses_the_attempts(clip_env):
+    """What fixed does, and why the dynamic presets exist."""
+    plan = clip_env("fixed", (325.9, 347.2), profile=_attempts_then_payoff())
+    assert plan.start == pytest.approx(325.9, abs=0.2)
+
+
+@pytest.mark.parametrize("preset", ["balanced", "loose"])
+def test_a_dynamic_clip_keeps_the_attempts_before_the_payoff(clip_env, preset):
+    plan = clip_env(preset, (325.9, 347.2), profile=_attempts_then_payoff())
+    assert 299.0 <= plan.start <= 304.0
+    # The payoff stays in, the quiet stretch after it does not.
+    assert 331.0 <= plan.start + plan.length <= 337.0
+
+
+def test_strong_material_runs_past_the_target(clip_env):
+    times = np.arange(0.0, 600.0, 0.05)
+    scores = np.where((times >= 100.0) & (times < 145.0), 1.5, -0.3)
+    fixed = clip_env("fixed", (100.0, 145.0), profile=(times, scores))
+    balanced = clip_env("balanced", (100.0, 145.0), profile=(times, scores))
+    assert fixed.length <= 37.5
+    assert balanced.length >= 40.0
+    assert balanced.length <= 45.0 + 1e-6
+
+
+def test_dead_air_shortens_the_clip(clip_env):
+    times = np.arange(0.0, 600.0, 0.05)
+    scores = np.where((times >= 200.0) & (times < 212.0), 2.0, -1.0)
+    fixed = clip_env("fixed", (200.0, 230.0), profile=(times, scores))
+    balanced = clip_env("balanced", (200.0, 230.0), profile=(times, scores))
+    assert fixed.length >= 28.0
+    assert 15.0 <= balanced.length <= 20.0
+
+
+@pytest.mark.parametrize("preset", ["balanced", "loose"])
+def test_dynamic_clips_stay_between_their_neighbours(clip_env, preset):
+    """No shared footage with the previous clip, and no reaching into the
+    next selected scene - that one needs its own peak."""
+    times = np.arange(0.0, 600.0, 0.05)
+    scores = np.ones_like(times)
+    scenes = [(100.0, 120.0), (120.0, 140.0), (140.0, 160.0)]
+    previous_end = 0.0
+    for k, scene in enumerate(scenes):
+        next_start = scenes[k + 1][0] if k + 1 < len(scenes) else 600.0
+        plan = clip_env(preset, scene, previous_end, next_start, profile=(times, scores))
+        assert plan is not None
+        assert plan.start >= previous_end - 1e-6
+        assert plan.start + plan.length <= next_start + 1e-6
+        previous_end = plan.start + plan.length
+
+
+def test_a_scene_the_previous_clip_covers_is_skipped(clip_env):
+    plan = clip_env("balanced", (100.0, 120.0), previous_end=125.0,
+                    profile=_attempts_then_payoff())
+    assert plan is None
+
+
+def test_dynamic_presets_are_reproducible(clip_env):
+    first = clip_env("balanced", (325.9, 347.2), profile=_attempts_then_payoff())
+    second = clip_env("balanced", (325.9, 347.2), profile=_attempts_then_payoff())
+    assert first == second
+
+
+def test_an_unknown_preset_falls_back_to_fixed(clip_env):
+    fixed = clip_env("fixed", (325.9, 347.2), profile=_attempts_then_payoff())
+    unknown = clip_env("dramatic", (325.9, 347.2), profile=_attempts_then_payoff())
+    assert unknown == fixed
