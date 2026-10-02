@@ -2176,14 +2176,18 @@ def generate_subtitles(
         except Exception as e:
             logging.warning(f"TTS generation failed: {e}, keeping subtitles only")
         
-        # Clean up temporary files
-        try:
-            srt_path.unlink()
-            json_path = srt_path.with_suffix(".json")
-            if json_path.exists():
-                json_path.unlink()
-        except Exception:
-            pass
+        # Clean up temporary files: the transcript, the word timings and the
+        # document PyCaps exports beside its output. Only the clip is kept.
+        for leftover in (
+            srt_path,
+            srt_path.with_suffix(".json"),
+            word_timings_path(srt_path),
+            srt_path.with_name(f"{srt_path.stem}_sub.json"),
+        ):
+            try:
+                leftover.unlink(missing_ok=True)
+            except OSError:
+                pass
         
         return output_path
             

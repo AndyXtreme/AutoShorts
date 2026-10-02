@@ -12,7 +12,6 @@ for parent in Path(__file__).resolve().parents:
 import streamlit as st
 
 from dashboard.components.config_panel import render_config_panel
-from dashboard.state import init_state
 from dashboard.utils.config import get_schema, load_env_values, save_env_values
 
 
@@ -42,7 +41,6 @@ def render() -> None:
     # Apply shared theme
     st.markdown(get_shared_css(), unsafe_allow_html=True)
     
-    init_state()
     
     # Header
     st.markdown("""
@@ -89,7 +87,3 @@ def render() -> None:
     # Full config panel with auto-save
     sections = tuple(get_schema())
     render_config_panel(sections)
-
-
-if __name__ == "__main__":
-    render()

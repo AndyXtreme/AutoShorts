@@ -1522,6 +1522,12 @@ def render_video_gpu(
 
             if 'ffmpeg_log' in locals() and ffmpeg_log:
                 ffmpeg_log.close()
+                # Only a failed encode's log is worth keeping; a clean one is
+                # just clutter next to the clip.
+                if process is not None and process.returncode == 0:
+                    log_path.unlink(missing_ok=True)
+                else:
+                    logging.error(f"FFmpeg render failed - its output is in {log_path}")
 
             if temp_audio.exists():
                 temp_audio.unlink()

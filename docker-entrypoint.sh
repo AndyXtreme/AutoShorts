@@ -15,7 +15,7 @@ fi
 case "${MODE:-ui}" in
     ui)
         echo "Starting AutoShorts web UI on port ${UI_PORT:-8501} ..."
-        exec streamlit run src/dashboard/About.py \
+        exec streamlit run src/dashboard/app.py \
             --server.port="${UI_PORT:-8501}" \
             --server.address=0.0.0.0
         ;;

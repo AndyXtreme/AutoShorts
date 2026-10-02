@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import datetime
 from pathlib import Path
 
 for parent in Path(__file__).resolve().parents:
@@ -14,7 +13,7 @@ for parent in Path(__file__).resolve().parents:
 import streamlit as st
 
 from dashboard.components.log_viewer import render_logs
-from dashboard.state import get_process_manager, init_state, push_job_history
+from dashboard.state import get_process_manager
 from dashboard.utils.config import load_env_values, save_env_values
 from dashboard.utils.thumbnails import list_videos
 
@@ -192,7 +191,6 @@ def render() -> None:
     # Apply shared theme
     st.markdown(get_shared_css(), unsafe_allow_html=True)
     
-    init_state()
 
     # Header
     st.markdown("""
@@ -670,11 +668,6 @@ def render() -> None:
         ):
             save_env_values(values, extras)
             manager.start(env=_build_env(values))
-            push_job_history({
-                "started_at": datetime.now().isoformat(timespec="seconds"),
-                "video": str(st.session_state.get("selected_gameplay") or "All gameplay videos"),
-                "status": "running",
-            })
             st.rerun()
     
     with control_cols[1]:
@@ -711,7 +704,3 @@ def render() -> None:
         import time
         time.sleep(2)
         st.rerun()
-
-
-if __name__ == "__main__":
-    render()

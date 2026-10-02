@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
@@ -16,7 +17,8 @@ class VideoInfo:
     thumbnail: Optional[Path]
 
 
-THUMB_DIR = Path("generated/.thumbnails")
+# A cache, not output: generated/ holds the finished clips and nothing else.
+THUMB_DIR = Path(tempfile.gettempdir()) / "autoshorts-thumbnails"
 
 
 def _ensure_thumb_dir() -> None:

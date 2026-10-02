@@ -5,7 +5,6 @@ numpy<2.0.0
 opencv-python==4.9.0.80
 pytest==9.0.2
 python-dotenv==1.2.1
-random2==1.0.2
 soundfile==0.13.1
 tqdm
 
@@ -27,14 +26,12 @@ openai-whisper
 # package, no download at runtime.
 silero-vad
 pycaps[all] @ git+https://github.com/francozanardi/pycaps.git
-nest_asyncio>=1.6.0  # Fix Playwright async/sync conflict
 
 # TTS Voiceover (Qwen3-TTS VoiceDesign)
 qwen-tts
 
 # Dashboard UI
 streamlit>=1.40.0
-plotly>=5.0.0
 watchdog>=3.0.0
 
 # FlashAttention 2 - Install prebuilt wheel for your torch version:
