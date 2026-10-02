@@ -24,82 +24,6 @@ for parent in Path(__file__).resolve().parents:
         break
 
 
-LOGO_PATH = Path("assets/logo.png")
-VIDEO_TYPE_LABELS = {
-    "gaming": "🎮 Gaming",
-    "podcasts": "🎙️ Podcasts",
-    "entertainment": "🎬 Entertainment",
-    "sports": "⚽ Sports",
-    "vlogs": "📷 Vlogs",
-    "tv_shows": "📺 TV Shows",
-    "documentaries": "🎥 Documentaries",
-    "music": "🎵 Music",
-    "educational": "📚 Educational",
-    "interviews": "🗣️ Interviews",
-    "comedy": "😂 Comedy",
-    "news_commentary": "📰 News & Commentary",
-    "esports": "🏆 Esports / Tournaments",
-    "cooking_diy": "🍳 Cooking & DIY",
-    "fitness": "💪 Fitness",
-}
-VIDEO_TYPE_STYLES = {
-    "podcasts": {
-        "podcast_quote": ("🧠", "Quotable pull-quotes and strong takes"),
-        "podcast_highlight": ("🎧", "Conversational key-moment highlights"),
-    },
-    "entertainment": {
-        "entertainment_reaction": ("😲", "Live reactions to twists and reveals"),
-        "entertainment_recap": ("📝", "Quick recap of key scenes"),
-    },
-    "sports": {
-        "sports_playbyplay": ("📣", "Play-by-play commentator energy"),
-        "sports_hype": ("🔥", "Crowd hype and clutch moment punches"),
-    },
-    "vlogs": {
-        "vlog_story": ("📖", "Personal storytelling beats"),
-        "vlog_highlight": ("✨", "Memorable life/travel highlights"),
-    },
-    "tv_shows": {
-        "tv_recap": ("📺", "Scene recap and context"),
-        "tv_dramatic": ("🎭", "Dramatic cliffhanger style"),
-    },
-    "documentaries": {
-        "documentary_insight": ("🔍", "Informative insight narration"),
-        "documentary_wonder": ("🌍", "Awe-focused spectacle captions"),
-    },
-    "music": {
-        "music_hype": ("🎤", "Performance/drop hype captions"),
-        "music_vibe": ("🌙", "Mood and vibe-first minimal captions"),
-    },
-    "educational": {
-        "educational_explainer": ("🧩", "Step-by-step explainer captions"),
-        "educational_aha": ("💡", "Aha-moment and key insight captions"),
-    },
-    "interviews": {
-        "interview_quote": ("🗨️", "Best quotable lines"),
-        "interview_hot_take": ("⚡", "Controversial/hot-take moments"),
-    },
-    "comedy": {
-        "comedy_punchline": ("🥁", "Punchline-focused timing"),
-        "comedy_reaction": ("🤣", "Crowd and reaction-focused captions"),
-    },
-    "news_commentary": {
-        "news_breaking": ("🚨", "Breaking-news urgency style"),
-        "news_debate": ("🎙️", "Debate and counterpoint style"),
-    },
-    "esports": {
-        "esports_playcast": ("🎮", "Caster-style tactical play calls"),
-        "esports_clutch": ("🏁", "Clutch round high-tension style"),
-    },
-    "cooking_diy": {
-        "cooking_step": ("👨‍🍳", "Step-by-step instructions"),
-        "cooking_reveal": ("🍽️", "Transformation/reveal moments"),
-    },
-    "fitness": {
-        "fitness_coach": ("🏋️", "Form cues and coaching prompts"),
-        "fitness_motivation": ("💥", "Motivation and intensity boosts"),
-    },
-}
 
 
 VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
@@ -180,10 +104,6 @@ def _save_upload(upload, destination: Path) -> None:
 
 def render() -> None:
     st.set_page_config(page_title="Generate - AutoShorts", page_icon="🎬", layout="wide")
-    
-    # Sidebar logo
-    if LOGO_PATH.exists():
-        st.logo(str(LOGO_PATH))
     
     # Import shared theme
     from dashboard.utils.theme import get_shared_css
@@ -356,225 +276,23 @@ def render() -> None:
         # Quick settings
         st.markdown("### ⚡ Quick Settings")
         
-        quick_cols = st.columns(2)
-        with quick_cols[0]:
-            def save_scene_limit():
-                values["SCENE_LIMIT"] = st.session_state.quick_scene_limit
-                save_env_values(values, extras)
-            
-            st.number_input(
-                "🎬 Clips to generate",
-                value=int(values.get("SCENE_LIMIT", 6)),
-                min_value=1,
-                max_value=20,
-                key="quick_scene_limit",
-                help="Number of short clips to create from the video",
-                on_change=save_scene_limit
-            )
-        
-        with quick_cols[1]:
-            def save_tts_toggle():
-                values["ENABLE_TTS"] = str(st.session_state.quick_enable_tts).lower()
-                save_env_values(values, extras)
-            
-            st.toggle(
-                "🔊 AI Voiceover",
-                value=str(values.get("ENABLE_TTS", "true")).lower() in ("true", "1", "yes"),
-                key="quick_enable_tts",
-                help="Add AI-generated narration to clips",
-                on_change=save_tts_toggle
-            )
-    
-    with col_right:
-        # Video type selection
-        st.markdown("### 🧭 Video Type")
-        video_type_options = list(VIDEO_TYPE_LABELS.keys())
-        current_video_type = str(extras.get("VIDEO_TYPE", values.get("VIDEO_TYPE", "gaming")))
-        if current_video_type not in video_type_options:
-            current_video_type = "gaming"
-        video_type_idx = video_type_options.index(current_video_type)
-
-        def save_video_type():
-            new_video_type = st.session_state.gen_video_type
-            values["VIDEO_TYPE"] = new_video_type
-            extras["VIDEO_TYPE"] = new_video_type
+        def save_scene_limit():
+            values["SCENE_LIMIT"] = st.session_state.quick_scene_limit
             save_env_values(values, extras)
 
-        st.selectbox(
-            "Content category",
-            options=video_type_options,
-            index=video_type_idx,
-            key="gen_video_type",
-            format_func=lambda v: VIDEO_TYPE_LABELS.get(v, v),
-            on_change=save_video_type,
-            label_visibility="collapsed",
+        st.number_input(
+            "🎬 Clips to generate",
+            value=int(values.get("SCENE_LIMIT", 6)),
+            min_value=1,
+            max_value=20,
+            key="quick_scene_limit",
+            help="Number of short clips to create from the video",
+            on_change=save_scene_limit
         )
-        
-        st.divider()
-
-        # Caption style selection
-        st.markdown("### 💬 Caption Style")
-        
-        # CAPTION_STYLE may be in extras (not in schema)
-        current_caption = str(extras.get("CAPTION_STYLE", values.get("CAPTION_STYLE", "auto")))
-        
-        GAMING_STYLES = ["gaming", "dramatic", "funny", "minimal"]
-        STORY_STYLES = ["story_news", "story_roast", "story_creepypasta", "story_dramatic"]
-        
-        def save_caption(new_style):
-            if new_style != current_caption:
-                # Save to extras since CAPTION_STYLE isn't in schema
-                extras["CAPTION_STYLE"] = new_style
-                save_env_values(values, extras)
-        
-        if current_video_type == "gaming":
-            # Determine current mode
-            if current_caption == "auto":
-                default_mode_idx = 0
-            elif current_caption in GAMING_STYLES:
-                default_mode_idx = 1
-            elif current_caption == "genz":
-                default_mode_idx = 2
-            elif current_caption in STORY_STYLES:
-                default_mode_idx = 3
-            else:
-                default_mode_idx = 0
-            
-            # Style mode tabs
-            mode_tab = st.radio(
-                "Mode",
-                ["🎯 Auto", "🎮 Gaming", "🔥 GenZ", "📖 Story"],
-                index=default_mode_idx,
-                horizontal=True,
-                key="caption_mode",
-                label_visibility="collapsed"
-            )
-            
-            if mode_tab == "🎯 Auto":
-                st.info("🤖 AI will pick the best style based on content")
-                st.caption("Detects: gaming, dramatic, funny, or minimal automatically")
-                save_caption("auto")
-                    
-            elif mode_tab == "🎮 Gaming":
-                style_info = {
-                    "gaming": ("🎮", "HEADSHOT! • GG EZ • Punchy gaming captions"),
-                    "dramatic": ("🎭", "The final stand... • Cinematic narration"),
-                    "funny": ("😂", "skill issue tbh • Meme-style commentary"),
-                    "minimal": ("✨", "nice. • Clean, understated captions"),
-                }
-                
-                current_gaming = current_caption if current_caption in GAMING_STYLES else "gaming"
-                
-                # If just switched to Gaming mode from another mode, save the default
-                if current_caption not in GAMING_STYLES:
-                    save_caption("gaming")
-                
-                for style, (icon, desc) in style_info.items():
-                    is_selected = style == current_gaming
-                    col1, col2 = st.columns([0.15, 0.85])
-                    with col1:
-                        if st.button(icon, key=f"gaming_{style}", type="primary" if is_selected else "secondary"):
-                            save_caption(style)
-                            st.rerun()
-                    with col2:
-                        label = f"**{style.title()}**" if is_selected else style.title()
-                        st.markdown(f"{label}: {desc}")
-                    
-            elif mode_tab == "🔥 GenZ":
-                st.success("💀 bruh • no cap • fr fr • Slang-heavy reactions")
-                st.caption("Perfect for younger audiences and meme content")
-                save_caption("genz")
-                    
-            elif mode_tab == "📖 Story":
-                story_info = {
-                    "story_news": ("📰", "Professional esports broadcaster narration"),
-                    "story_roast": ("🔥", "Sarcastic roasting commentary"),
-                    "story_creepypasta": ("👻", "Horror/tension narrative style"),
-                    "story_dramatic": ("🎭", "Epic cinematic storytelling"),
-                }
-                
-                current_story = current_caption if current_caption in STORY_STYLES else "story_news"
-                
-                # If just switched to Story mode from another mode, save the default
-                if current_caption not in STORY_STYLES:
-                    save_caption("story_news")
-                
-                for style, (icon, desc) in story_info.items():
-                    is_selected = style == current_story
-                    col1, col2 = st.columns([0.15, 0.85])
-                    with col1:
-                        if st.button(icon, key=f"story_{style}", type="primary" if is_selected else "secondary"):
-                            save_caption(style)
-                            st.rerun()
-                    with col2:
-                        label = f"**{style.replace('story_', '').title()}**" if is_selected else style.replace('story_', '').title()
-                        st.markdown(f"{label}: {desc}")
-        else:
-            st.info("🎯 Auto lets AI adapt style to the selected video type.")
-            style_info = VIDEO_TYPE_STYLES.get(current_video_type, {})
-            supported_styles = list(style_info.keys())
-            if current_caption not in supported_styles and current_caption != "auto" and supported_styles:
-                save_caption(supported_styles[0])
-            style_mode = st.radio(
-                "Mode",
-                ["🎯 Auto", "🎨 Curated"],
-                index=0 if current_caption == "auto" else 1,
-                horizontal=True,
-                key=f"caption_mode_{current_video_type}",
-                label_visibility="collapsed"
-            )
-            if style_mode == "🎯 Auto":
-                save_caption("auto")
-            else:
-                current_selected = current_caption if current_caption in supported_styles else (supported_styles[0] if supported_styles else "auto")
-                for style, (icon, desc) in style_info.items():
-                    is_selected = style == current_selected
-                    col1, col2 = st.columns([0.15, 0.85])
-                    with col1:
-                        if st.button(icon, key=f"{current_video_type}_{style}", type="primary" if is_selected else "secondary"):
-                            save_caption(style)
-                            st.rerun()
-                    with col2:
-                        label = f"**{style.replace('_', ' ').title()}**" if is_selected else style.replace('_', ' ').title()
-                        st.markdown(f"{label}: {desc}")
-
-        # --- Language & Subtitle Style row ---
-        st.divider()
-        sub_left, sub_right = st.columns([1, 1])
-
-        # Language selector
-        with sub_left:
-            st.markdown("### 🌐 Language")
-            TTS_LANGUAGE_LABELS = {
-                "en": "🇺🇸 English", "zh": "🇨🇳 Chinese", "ja": "🇯🇵 Japanese",
-                "ko": "🇰🇷 Korean", "de": "🇩🇪 German", "fr": "🇫🇷 French",
-                "ru": "🇷🇺 Russian", "pt": "🇧🇷 Portuguese", "es": "🇪🇸 Spanish",
-                "it": "🇮🇹 Italian",
-            }
-            lang_options = list(TTS_LANGUAGE_LABELS.keys())
-            current_lang = str(values.get("TTS_LANGUAGE", extras.get("TTS_LANGUAGE", "en")))
-            lang_idx = lang_options.index(current_lang) if current_lang in lang_options else 0
-
-            def save_language():
-                new_lang = st.session_state.gen_language
-                # Persist language as an extra since TTS_LANGUAGE is managed in Generate UI now
-                values["TTS_LANGUAGE"] = new_lang
-                extras["TTS_LANGUAGE"] = new_lang
-                save_env_values(values, extras)
-
-            st.selectbox(
-                "Voiceover & caption language",
-                options=lang_options,
-                index=lang_idx,
-                key="gen_language",
-                format_func=lambda v: TTS_LANGUAGE_LABELS.get(v, v),
-                on_change=save_language,
-                label_visibility="collapsed",
-            )
-            st.caption(f"Currently: {TTS_LANGUAGE_LABELS.get(current_lang, current_lang)}")
-
+    
+    with col_right:
         # PyCaps Subtitle Style selector
-        with sub_right:
+        with st.container():
             st.markdown("### ✨ Subtitle Style")
 
             PYCAPS_TEMPLATES = {

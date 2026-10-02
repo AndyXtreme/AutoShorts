@@ -192,8 +192,6 @@ def test_no_stage_hardcodes_an_encoder():
     The render, dead-air removal and caption stages each used to name their
     own encoder - HEVC or H.264 - so an AV1 recording went through two
     generations of another codec on its way to an AV1 Short.
-    ai_providers is exempt: it writes 640px proxies for the AI ranking,
-    which are thrown away.
     """
     import re
 
@@ -202,7 +200,7 @@ def test_no_stage_hardcodes_an_encoder():
     offenders = [
         f"{path.name}:{number}"
         for path in src.rglob("*.py")
-        if path.name not in ("video_io.py", "ai_providers.py")
+        if path.name != "video_io.py"
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
         if pattern.search(line)
     ]

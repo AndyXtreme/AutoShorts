@@ -8,7 +8,7 @@
 # CUDA 12.8 is required for Blackwell (sm_120, RTX 50xx) - the 12.6 nvcc has no
 # sm_120 codegen. Deliberately the 2.8.0 tag and not 2.10: the newer tag is
 # Ubuntu 24.04 + Python 3.12, which renames the apt packages (t64 transition,
-# libgl1-mesa-glx dropped) and makes the cp311 FlashAttention wheel unusable.
+# libgl1-mesa-glx dropped).
 # =============================================================================
 FROM pytorch/pytorch:2.8.0-cuda12.8-cudnn9-devel AS builder
 
@@ -144,12 +144,6 @@ ENV FFPROBE_BINARY=/usr/local/bin/ffprobe
 ENV LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 ENV NVIDIA_DRIVER_CAPABILITIES=all
 
-# FlashAttention for the TTS path. Matched to the base image's torch 2.8;
-# a mismatched build fails to load with an undefined-symbol ImportError.
-# Optional at runtime - tts_generator falls back to eager attention.
-RUN pip install --no-cache-dir \
-    https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.16/flash_attn-2.6.3%2Bcu128torch2.8-cp311-cp311-linux_x86_64.whl
-
 # pycaps is installed straight from GitHub, so pip needs git here. Installed
 # and removed within the same layer - purging it later would not shrink the
 # image, since the files would still live in the earlier layer.
@@ -181,7 +175,7 @@ RUN rm -f /opt/conda/lib/libstdc++.so.6 && \
 
 COPY . .
 
-RUN mkdir -p gameplay generated assets
+RUN mkdir -p gameplay generated
 
 # Fail the build rather than ship an image with a broken GPU stack.
 #
@@ -194,11 +188,11 @@ RUN mkdir -p gameplay generated assets
 # The CUDA version the wheel was built against is the meaningful proxy: 12.8+
 # is what carries sm_120. Both are verified for real on first run.
 RUN python -c "\
-import importlib.util, torch, flash_attn; \
+import importlib.util, torch; \
 major, minor = (int(p) for p in torch.version.cuda.split('.')[:2]); \
 assert (major, minor) >= (12, 8), f'CUDA {torch.version.cuda} has no sm_120 support'; \
 assert importlib.util.find_spec('decord'), 'decord not installed'; \
-print(f'PyTorch {torch.__version__} (CUDA {torch.version.cuda}), FlashAttention {flash_attn.__version__}, decord present')"
+print(f'PyTorch {torch.__version__} (CUDA {torch.version.cuda}), decord present')"
 
 # AV1 needs a decoder to read the source and an encoder to write the short,
 # and neither exists in the conda FFmpeg. Assert the new one is what PATH

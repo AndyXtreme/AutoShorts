@@ -8,15 +8,8 @@ python-dotenv==1.2.1
 soundfile==0.13.1
 tqdm
 
-# PyTorch - Install separately with CUDA support:
-#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
-# Requires: torch>=2.10.0 with CUDA 12.6+
-# Also install torchcodec for torchaudio video support:
-#   pip install torchcodec
-
-# AI Providers
-google-genai>=1.0.0
-openai>=1.0.0
+# PyTorch comes from the base image (pytorch/pytorch 2.8, CUDA 12.8) - see
+# the Dockerfile. decord is built there too, against CUDA and FFmpeg.
 
 # Subtitles
 openai-whisper
@@ -27,16 +20,6 @@ openai-whisper
 silero-vad
 pycaps[all] @ git+https://github.com/francozanardi/pycaps.git
 
-# TTS Voiceover (Qwen3-TTS VoiceDesign)
-qwen-tts
-
 # Dashboard UI
 streamlit>=1.40.0
 watchdog>=3.0.0
-
-# FlashAttention 2 - Install prebuilt wheel for your torch version:
-#   For torch 2.10 + CUDA 12.x (Python 3.10):
-#   pip install https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.12/flash_attn-2.6.3+cu128torch2.10-cp310-cp310-linux_x86_64.whl
-#
-#   For other versions, see: https://github.com/mjun0812/flash-attention-prebuild-wheels
-#   Or build from source: MAX_JOBS=4 pip install flash-attn --no-build-isolation

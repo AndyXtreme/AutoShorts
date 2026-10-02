@@ -19,14 +19,6 @@ def _cleanup_models():
     """Attempt to clear model singletons and free GPU memory."""
     logging.info("Cleaning up models and GPU resources...")
 
-    # Try clearing Qwen TTS singleton if present
-    try:
-        from tts_generator import QwenTTS
-        QwenTTS.clear_instance()
-        logging.info("Cleared QwenTTS instance")
-    except Exception as e:
-        logging.debug(f"No QwenTTS to clear or clear failed: {e}")
-
     # Try to free torch CUDA memory if torch is available
     try:
         import torch

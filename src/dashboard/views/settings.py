@@ -25,15 +25,10 @@ FORMAT_PRESETS = {
     "📺 Standard": {"ratio": (4, 3), "desc": "4:3 classic"},
 }
 
-LOGO_PATH = Path("assets/logo.png")
 
 
 def render() -> None:
     st.set_page_config(page_title="Settings - AutoShorts", page_icon="⚙️", layout="wide")
-    
-    # Sidebar logo
-    if LOGO_PATH.exists():
-        st.logo(str(LOGO_PATH))
     
     # Import shared theme
     from dashboard.utils.theme import get_shared_css
@@ -46,7 +41,7 @@ def render() -> None:
     st.markdown("""
         <div class="page-header">
             <h1>⚙️ Settings</h1>
-            <p>Configure video format, AI providers, subtitles, and more</p>
+            <p>Configure video format, clip selection, subtitles, and more</p>
         </div>
     """, unsafe_allow_html=True)
     

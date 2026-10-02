@@ -50,8 +50,8 @@ def test_every_bool_survives_a_full_round_trip(env_file):
 
 
 def test_values_with_hashes_are_not_truncated(env_file):
-    cfg.save_env_values({"TTS_VOICE_DESCRIPTION": "warm voice # not a comment"})
-    assert dotenv_values(str(env_file))["TTS_VOICE_DESCRIPTION"] == "warm voice # not a comment"
+    cfg.save_env_values({"DEBUG_RENDERED_CLIPS": "clip #1.mp4"})
+    assert dotenv_values(str(env_file))["DEBUG_RENDERED_CLIPS"] == "clip #1.mp4"
 
 
 def test_save_leaves_no_temporary_file_behind(env_file):

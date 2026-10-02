@@ -182,70 +182,11 @@ def get_schema() -> List[EnvSection]:
             ],
         ),
         EnvSection(
-            title="AI Providers",
-            expanded=True,
-            fields=[
-                EnvField("AI_PROVIDER", "AI provider", "select", "local", options=["local", "openai", "gemini"],
-                         help_text="local = heuristics only, no API calls and no cost. openai/gemini rank scenes "
-                                   "semantically (funny, clutch, epic fail) but send clips to that provider"),
-                EnvField(
-                    "VIDEO_TYPE",
-                    "Video type",
-                    "select",
-                    "gaming",
-                    options=[
-                        "gaming", "podcasts", "entertainment", "sports", "vlogs",
-                        "tv_shows", "documentaries", "music", "educational",
-                        "interviews", "comedy", "news_commentary", "esports",
-                        "cooking_diy", "fitness",
-                    ],
-                    help_text="Primary source content category used for AI clipping strategy and caption style presets",
-                ),
-                EnvField("AI_ANALYSIS_ENABLED", "AI analysis enabled", "bool", True,
-                         help_text="Use AI to rank scenes by content quality. Disable for faster but less smart selection"),
-                EnvField("GEMINI_API_KEY", "Gemini API key", "password", "",
-                         help_text="Your Google Gemini API key (get from ai.google.dev)"),
-                EnvField("OPENAI_API_KEY", "OpenAI API key", "password", "",
-                         help_text="Your OpenAI API key (get from platform.openai.com)"),
-                EnvField("GEMINI_MODEL", "Gemini model", "select", "gemini-3-flash-preview",
-                         options=["gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-lite"],
-                         help_text="Gemini model for video analysis"),
-                EnvField("GEMINI_DEEP_ANALYSIS", "Enable Gemini Deep Analysis", "bool", False,
-                         help_text="Upload entire video for better context (slow initial upload)"),
-                EnvField("OPENAI_MODEL", "OpenAI model", "select", "gpt-5-mini",
-                         options=["gpt-5-mini", "gpt-5", "gpt-4o", "gpt-4o-mini", "gpt-4-turbo"],
-                         help_text="OpenAI model for video analysis"),
-                EnvField("OPENAI_TAGGING_MODEL", "OpenAI tagging model", "select", "gpt-5-mini",
-                         options=["gpt-5-mini", "gpt-5", "gpt-4o", "gpt-4o-mini", "gpt-4-turbo"],
-                         help_text="Model for caption generation (separate from video analysis). Gemini uses same model for both"),
-                EnvField("AI_SCORE_WEIGHT", "AI score weight", "float", 0.7, min_value=0.0, max_value=1.0, step=0.05,
-                         help_text="How much AI ranking matters vs action detection. 1.0 = AI only, 0 = action only"),
-            ],
-        ),
-        EnvSection(
-            title="Semantic Analysis",
-            fields=[
-                EnvField("CANDIDATE_CLIP_COUNT", "Candidate clip count", "int_auto", 0, min_value=10, max_value=200,
-                         help_text="How many clips to send to AI for ranking. More = better selection but higher cost"),
-                EnvField("CANDIDATE_CLIP_DURATION", "Candidate clip duration (s)", "int", 120, min_value=10, max_value=600,
-                         help_text="Gemini only: Length of video clips for analysis. OpenAI uses frames instead"),
-            ],
-        ),
-        EnvSection(
             title="Subtitles",
             expanded=True,
             fields=[
                 EnvField("ENABLE_SUBTITLES", "Enable subtitles", "bool", True,
                          help_text="Add animated captions to generated clips"),
-                EnvField(
-                    "SUBTITLE_MODE",
-                    "Subtitle mode",
-                    "select",
-                    "speech",
-                    options=["speech", "ai_captions", "none"],
-                    help_text="speech = transcribe what is actually said (local, via Whisper). "
-                              "ai_captions = AI-written commentary, requires an OpenAI or Gemini key",
-                ),
                 EnvField(
                     "WHISPER_MODEL",
                     "Whisper model",
@@ -283,12 +224,6 @@ def get_schema() -> List[EnvSection]:
                          min_value=0.0, max_value=5.0, step=0.1,
                          help_text="Join speech regions closer than this. One region per breath would leave "
                                    "Whisper too little context to recognise words"),
-                EnvField("MAX_CAPTIONS", "Max captions", "int", 0, min_value=0, max_value=50,
-                         help_text="Maximum captions per clip. 0 = Auto (dynamic based on video duration)"),
-                EnvField("ENABLE_AI_CAPTION_ENHANCEMENT", "AI caption enhancement", "bool", False,
-                         help_text="Rewrite captions to be punchier. Needs an AI provider, ignored in local mode"),
-                EnvField("ENABLE_CAPTION_EMOJIS", "Caption emojis", "bool", False,
-                         help_text="Sprinkle emojis into captions. Needs an AI provider, ignored in local mode"),
             ],
         ),
         EnvSection(
@@ -346,44 +281,6 @@ def get_schema() -> List[EnvSection]:
                 EnvField("PYCAPS_KEEP_SPLITTERS", "Split long captions", "bool", True,
                          help_text="On: text is chunked by the char limits above. Off: a whole transcript block "
                                    "is shown at once, which matches the SRT exactly but produces walls of text"),
-                EnvField(
-                    "CAPTION_STYLE",
-                    "Caption tone",
-                    "select",
-                    "auto",
-                    options=["auto", "gaming", "funny", "dramatic", "esports_playcast", "comedy_punchline",
-                             "vlog_story", "podcast_quote", "educational_explainer"],
-                    help_text="Wording style for AI-written captions. Only used in ai_captions mode",
-                ),
-            ],
-        ),
-        EnvSection(
-            title="TTS Voiceover",
-            fields=[
-                EnvField("ENABLE_TTS", "Enable TTS", "bool", False,
-                         help_text="Overlay an AI voiceover. Off keeps the original audio, which is usually what "
-                                   "you want for gameplay, and saves VRAM and processing time"),
-                EnvField("TTS_MODEL", "TTS model", "select", "qwen", options=["qwen"],
-                         help_text="Text-to-speech model (Qwen is fast and high quality)"),
-                EnvField("TTS_LANGUAGE", "Voiceover language", "select", "de",
-                         options=["de", "en", "es", "fr", "it", "pt", "nl", "pl", "ru", "ja", "ko", "zh"],
-                         help_text="Language the generated voiceover speaks"),
-                EnvField("TTS_SPEED", "Voiceover speed", "float", 1.0, min_value=0.5, max_value=2.0, step=0.05,
-                         help_text="Playback rate of the voiceover. 1.0 = normal"),
-                EnvField("TTS_DEVICE", "TTS device", "select", "cuda", options=["cuda", "cpu"],
-                         help_text="cuda = GPU (fast), cpu = processor (slower but works everywhere)"),
-                EnvField(
-                    "TTS_VOICE_DESCRIPTION",
-                    "Voice description override",
-                    "text",
-                    "",
-                    help_text="Custom voice style (e.g. 'energetic male gamer'). Leave blank for auto",
-                    multiline=True,
-                ),
-                EnvField("TTS_GAME_AUDIO_VOLUME", "Game audio volume", "float", 0.3, min_value=0.0, max_value=1.0, step=0.05,
-                         help_text="How loud the original game audio is when voiceover plays"),
-                EnvField("TTS_VOICEOVER_VOLUME", "Voiceover volume", "float", 1.0, min_value=0.0, max_value=2.0, step=0.05,
-                         help_text="How loud the AI voiceover narration is"),
             ],
         ),
         EnvSection(
@@ -465,7 +362,7 @@ def _quote(value: str) -> str:
     """Quote a value that dotenv would otherwise read back differently.
 
     An unquoted `#` starts an inline comment and surrounding whitespace is
-    stripped, so a free-text field such as TTS_VOICE_DESCRIPTION could come
+    stripped, so a free-text field such as DEBUG_RENDERED_CLIPS could come
     back truncated on the next load.
     """
     if value == "":

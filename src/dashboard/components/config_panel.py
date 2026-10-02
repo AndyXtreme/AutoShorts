@@ -6,29 +6,15 @@ import streamlit as st
 
 from dashboard.utils.config import EnvSection, coerce_value, load_env_values, save_env_values
 
-TTS_LANGUAGE_LABELS = {
-    "en": "🇺🇸 English",
-    "zh": "🇨🇳 Chinese",
-    "ja": "🇯🇵 Japanese",
-    "ko": "🇰🇷 Korean",
-    "de": "🇩🇪 German",
-    "fr": "🇫🇷 French",
-    "ru": "🇷🇺 Russian",
-    "pt": "🇵🇹 Portuguese",
-    "es": "🇪🇸 Spanish",
-    "it": "🇮🇹 Italian",
-}
-
 # Section icons for visual enhancement
 SECTION_ICONS = {
     "Core Settings": "🎯",
+    "Action Detection": "🎮",
+    "Dead Air Removal": "✂️",
     "Clip Length Settings": "⏱️",
-    "AI Providers": "🤖",
-    "Semantic Analysis": "🔍",
     "Subtitles": "💬",
-    "TTS Voiceover": "🔊",
+    "Caption Style & Layout": "🎨",
     "Decord & Debug": "🔧",
-    "Rendering Settings": "🎬",
 }
 
 
@@ -88,16 +74,6 @@ def _render_field(field, current_value):
         current_str = str(current_value)
         index = options.index(current_str) if current_str in options else 0
 
-        if field.name == "TTS_LANGUAGE":
-            return st.selectbox(
-                field.label,
-                options=options,
-                index=index,
-                key=key,
-                help=field.help_text,
-                format_func=lambda v: TTS_LANGUAGE_LABELS.get(v, v),
-            )
-
         return st.selectbox(
             field.label,
             options=options,
@@ -133,9 +109,6 @@ def render_config_panel(sections: Tuple[EnvSection, ...]) -> Tuple[Dict[str, str
     values, extras = load_env_values()
     updated_values: Dict[str, str] = dict(values)
     
-    # Track AI provider for conditional rendering
-    ai_provider = values.get("AI_PROVIDER", "openai")
-    
     # Track changes for auto-save
     changes_made = False
 
@@ -144,18 +117,6 @@ def render_config_panel(sections: Tuple[EnvSection, ...]) -> Tuple[Dict[str, str
         with st.expander(f"{icon} {section.title}", expanded=section.expanded):
             # Create columns for better layout in some sections
             for field in section.fields:
-                # Conditional rendering based on AI provider
-                if field.name == "GEMINI_API_KEY" and ai_provider != "gemini":
-                    continue
-                if field.name == "OPENAI_API_KEY" and ai_provider not in ("openai",):
-                    continue
-                if field.name == "GEMINI_MODEL" and ai_provider != "gemini":
-                    continue
-                if field.name == "GEMINI_DEEP_ANALYSIS" and ai_provider != "gemini":
-                    continue
-                if field.name in ("OPENAI_MODEL", "OPENAI_TAGGING_MODEL") and ai_provider != "openai":
-                    continue
-                
                 current_value = coerce_value(field, values.get(field.name))
                 result = _render_field(field, current_value)
                 
@@ -164,10 +125,6 @@ def render_config_panel(sections: Tuple[EnvSection, ...]) -> Tuple[Dict[str, str
                     changes_made = True
                 
                 updated_values[field.name] = result
-                
-                # Update AI provider tracking if it changed
-                if field.name == "AI_PROVIDER":
-                    ai_provider = result
 
     # Auto-save when changes are detected
     if changes_made:
