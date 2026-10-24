@@ -1,5 +1,9 @@
 # AutoShorts
 
+[![Docker Hub](https://img.shields.io/badge/Docker%20Hub-andyxtreme%2Fautoshorts-2496ED?logo=docker&logoColor=white)](https://hub.docker.com/r/andyxtreme/autoshorts)
+[![Docker Pulls](https://img.shields.io/docker/pulls/andyxtreme/autoshorts?logo=docker)](https://hub.docker.com/r/andyxtreme/autoshorts)
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20me-FF5E5B?logo=kofi&logoColor=white)](https://ko-fi.com/andyxtreme)
+
 Turns long gameplay recordings into vertical Shorts: it finds the moments with
 the most action, cuts them into 9:16 clips, removes dead air and burns in
 animated captions of what you said. Everything runs locally on an NVIDIA GPU,
@@ -78,3 +82,11 @@ Tests run inside the container:
 ```bash
 docker compose exec autoshorts python -m pytest -q tests
 ```
+
+---
+
+## Support
+
+If this edition helps you, I'd appreciate a small donation – thank you! ☕
+
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20me-FF5E5B?logo=kofi&logoColor=white)](https://ko-fi.com/andyxtreme)
